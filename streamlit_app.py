@@ -10,48 +10,46 @@ import numpy as np
 from sklearn.cluster import KMeans
 
 """
-STREAMLIT versija originalios paieškos programos:
-- Leidžia ĮKELTI nuotrauką ir ieškoti panašių vaizdų (pagal nuotrauką) – kaip originale.
-- Leidžia ieškoti pagal tekstą (produkto pavadinimą / tipą / SKU) – kaip originale.
-- Spalvos filtravimas su slankikliu ir rūšiavimas pagal panašumą + spalvos atstumą – kaip originale.
-- Filtravimas pagal aptiktą objekto tipą (table/lamp/…): pirmo hito tipas → rodom tik to paties tipo – kaip originale.
-- Veikia su Marqo per HTTP API. UI terminologija lietuvių kalba.
+STREAMLIT versija (online) – pilnai atkuria originalią logiką:
+- ĮKĖLIMAS: galite įkelti paveikslėlį; app išsaugo failą į viešai pasiekiamą vietą
+  ir perduoda jo URL į Marqo paieškai (q = public_image_url).
+- TEKSTO paieška: galite ieškoti pagal pavadinimą / tipą / SKU.
+- Spalvos filtras (KMeans dominuojanti spalva) ir rūšiavimas pagal balą – kaip originale.
+- Filtravimas pagal objekto tipą (remiantis pirmu hitu) – kaip originale.
+- Paveikslėliai rodomi iš VENDOR URL laukų, kurie jau yra Marqo dokumentuose.
 
-PASTABA dėl įkelto vaizdo URL:
-Originale įkeltas failas buvo pasiekiamas per lokalią HTTP nuorodą (pvz., host.docker.internal:8080).
-Kad tai veiktų ONLINE aplinkoje, sukonfigūruokite viešą katalogą, kuriame Streamlit gali išsaugoti failą,
-o viešasis URL (PUBLIC_IMAGE_URL_PREFIX) turi rodyti į tą katalogą. Pvz., CDN ar statinis serveris už Cloudflare.
+BŪTINA ONLINE ĮKĖLIMUI: turėkite viešą statinį URL, kuris atitinka vietinį katalogą,
+kuriame app išsaugo įkeltą failą (žiūrėkite secrets skiltį žemiau).
 """
 
 # -----------------------------
-# Konfigūracija
+# Konfigūracija (iš secrets arba ENV)
 # -----------------------------
 
-def _get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
+def _cfg(key: str, default: Optional[str] = None) -> Optional[str]:
     try:
         return st.secrets[key]  # type: ignore[attr-defined]
     except Exception:
         return os.getenv(key, default)
 
-# Marqo ir indeksas
-MARQO_URL: str = (_get_secret("MARQO_URL", "https://marqo.logicafutura.com") or "").rstrip("/")
-INDEX_NAME: str = _get_secret("INDEX_NAME", "furniture-index") or "furniture-index"
+MARQO_URL: str = (_cfg("MARQO_URL", "https://marqo.logicafutura.com") or "").rstrip("/")
+INDEX_NAME: str = _cfg("INDEX_NAME", "furniture-index") or "furniture-index"
 
-# Laukų pavadinimai (pritaikykite prie savo schemos)
-TITLE_FIELD: str = _get_secret("TITLE_FIELD", "name") or "name"          # produkto pavadinimas
-IMAGE_FIELD: str = _get_secret("IMAGE_FIELD", "image_url") or "image_url"  # vaizdo URL laukas
-DOM_COLOR_FIELD: str = _get_secret("DOMINANT_COLOR_FIELD", "dominant_color") or "dominant_color"
-SKU_FIELD: str = _get_secret("SKU_FIELD", "sku") or "sku"
+# Laukų pavadinimai (pagal jūsų indeksavimo skriptą)
+TITLE_FIELD: str = _cfg("TITLE_FIELD", "title") or "title"
+IMAGE_FIELD: str = _cfg("IMAGE_FIELD", "image") or "image"
+ALT_IMAGE_FIELD: str = _cfg("ALT_IMAGE_FIELD", "image_vendor_url") or "image_vendor_url"
+DOM_COLOR_FIELD: str = _cfg("DOMINANT_COLOR_FIELD", "dominant_color") or "dominant_color"
+SKU_FIELD: str = _cfg("SKU_FIELD", "sku") or "sku"
 
-# Kur įrašyti įkeltą vaizdą ir koks bus jo viešas URL
-# BŪTINA: PUBLIC_IMAGE_URL_PREFIX turi baigtis "/" ir būti pasiekiamas iš Marqo
-IMAGE_FOLDER: str = _get_secret("IMAGE_UPLOAD_DIR", "./public") or "./public"
-PUBLIC_IMAGE_URL_PREFIX: str = _get_secret("PUBLIC_IMAGE_URL_PREFIX", "http://host.docker.internal:8080/") or "http://host.docker.internal:8080/"
-QUERY_FILENAME: str = _get_secret("QUERY_FILENAME", "uploaded_query.jpg") or "uploaded_query.jpg"
+# Failų saugojimas įkėlimui → viešas URL
+IMAGE_UPLOAD_DIR: str = _cfg("IMAGE_UPLOAD_DIR", "./public") or "./public"
+PUBLIC_IMAGE_URL_PREFIX: str = _cfg("PUBLIC_IMAGE_URL_PREFIX", "http://host.docker.internal:8080/") or "http://host.docker.internal:8080/"
+QUERY_FILENAME: str = _cfg("QUERY_FILENAME", "uploaded_query.jpg") or "uploaded_query.jpg"
 
 # Cloudflare Access (jei Marqo saugomas per Access Service Token)
-CF_ID = _get_secret("CF_ACCESS_CLIENT_ID")
-CF_SECRET = _get_secret("CF_ACCESS_CLIENT_SECRET")
+CF_ID = _cfg("CF_ACCESS_CLIENT_ID")
+CF_SECRET = _cfg("CF_ACCESS_CLIENT_SECRET")
 
 # HTTP antraštės
 HEADERS: Dict[str, str] = {"Content-Type": "application/json"}
@@ -63,11 +61,11 @@ if CF_ID and CF_SECRET:
 KNOWN_TYPES = ['table', 'lamp', 'rack', 'chair', 'sofa', 'bench', 'bed', 'cabinet', 'desk']
 
 # -----------------------------
-# Pagalbinės funkcijos (tokios pačios idėjos kaip originale)
+# Pagalbinės funkcijos
 # -----------------------------
 
 def get_dominant_color(image_bytes: bytes) -> np.ndarray:
-    """Apskaičiuoja dominuojančią spalvą; ignoruoja beveik baltą/juodą foną."""
+    """Apskaičiuoja dominuojančią spalvą, ignoruojant beveik baltą/juodą foną."""
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
         img = img.resize((50, 50))
@@ -107,13 +105,13 @@ def detect_object_type(title: str) -> str:
     return "other"
 
 
-def search_similar_images(query: str) -> Optional[Dict[str, Any]]:
+def marqo_search(query: str) -> Optional[Dict[str, Any]]:
     payload = {
         "limit": 1000,
         "q": query,
         "searchMethod": "TENSOR",
         "searchableAttributes": [IMAGE_FIELD, TITLE_FIELD],
-        "attributesToRetrieve": ["_id", TITLE_FIELD, IMAGE_FIELD, DOM_COLOR_FIELD, SKU_FIELD]
+        "attributesToRetrieve": ["_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD, SKU_FIELD]
     }
     try:
         url = f"{MARQO_URL}/indexes/{INDEX_NAME}/search"
@@ -131,8 +129,8 @@ def search_similar_images(query: str) -> Optional[Dict[str, Any]]:
 # -----------------------------
 
 st.set_page_config(page_title="Vaizdų paieška", layout="wide")
-st.title("🖼️ Panašių vaizdų paieška")
-st.markdown("Įkelkite nuotrauką ARBA įveskite raktažodį, kad surastumėte vizualiai panašius produktus.")
+st.title("🖼️ Panašių vaizdų paieška (Marqo)")
+st.markdown("Įkelkite nuotrauką ARBA įveskite raktažodį ir raskite panašius produktus iš tiekėjų svetainių.")
 
 # Būsena
 if 'last_upload_hash' not in st.session_state:
@@ -147,8 +145,8 @@ if 'detected_object_type' not in st.session_state:
     st.session_state.detected_object_type = None
 
 # Valdikliai
-uploaded_file = st.file_uploader("Pasirinkite paveikslėlį", type=["jpg", "jpeg", "png"], key="uploader")
-search_query = st.text_input("🔍 Ieškoti pagal produkto pavadinimą ar tipą (nebūtina):", "")
+uploaded_file = st.file_uploader("Pasirinkite paveikslėlį (JPG/PNG)", type=["jpg", "jpeg", "png"], key="uploader")
+search_query = st.text_input("🔍 Ieškoti pagal pavadinimą / tipą / SKU (nebūtina):", "")
 
 # Pagrindinė logika
 if uploaded_file:
@@ -167,34 +165,33 @@ if uploaded_file:
         st.session_state.last_color_threshold = color_threshold
         st.session_state.current_page = 0
 
-        # 1) Išsaugome failą viešai pasiekiamame kataloge
-        os.makedirs(IMAGE_FOLDER, exist_ok=True)
-        query_path = os.path.join(IMAGE_FOLDER, QUERY_FILENAME)
+        # 1) Išsaugome failą į vietinį katalogą
+        os.makedirs(IMAGE_UPLOAD_DIR, exist_ok=True)
+        query_path = os.path.join(IMAGE_UPLOAD_DIR, QUERY_FILENAME)
         with open(query_path, "wb") as f:
             f.write(img_bytes)
 
-        # 2) Konstruojame viešą URL, kurį Marqo galės pasiekti
-        if not PUBLIC_IMAGE_URL_PREFIX.endswith('/'):
-            PUBLIC_IMAGE_URL_PREFIX += '/'
-        query_url = PUBLIC_IMAGE_URL_PREFIX + QUERY_FILENAME
+        # 2) Viešas URL, kurį Marqo galės pasiekti
+        base = PUBLIC_IMAGE_URL_PREFIX
+        if not base.endswith('/'):
+            base += '/'
+        query_url = base + QUERY_FILENAME
 
-        # 3) Apskaičiuojame įkelto vaizdo dominuojančią spalvą
+        # 3) Dominuojanti spalva
         query_color = get_dominant_color(img_bytes)
         st.session_state.query_color = query_color
 
-        # 4) Ieškome panašių vaizdų pagal įkelto vaizdo URL
+        # 4) Paieška pagal įkelto vaizdo URL
         with st.spinner("Ieškoma panašių vaizdų..."):
-            results = search_similar_images(query_url)
+            results = marqo_search(query_url)
             if results and results.get("hits"):
                 raw_hits = results["hits"]
                 for hit in raw_hits:
                     title = hit.get(TITLE_FIELD, hit.get("title", ""))
                     hit["object_type"] = detect_object_type(title)
 
-                # Nustatome bazinį tipą pagal pirmą hitą
                 st.session_state.detected_object_type = raw_hits[0]["object_type"]
 
-                # Spalvos filtras (jei įjungtas)
                 filtered_hits = raw_hits
                 if use_color_filter:
                     filtered_hits = []
@@ -205,22 +202,23 @@ if uploaded_file:
                         if dist <= color_threshold + 5:
                             filtered_hits.append(hit)
 
-                    # Rūšiuojame: modelio balas minus normalizuotas spalvos atstumas (441 ≈ max RGB dist)
+                    # Rūšiuojame pagal modelio balą – (spalvos atstumas / 441)
                     filtered_hits.sort(
                         key=lambda h: h.get('_score', 0) - (color_distance(query_color, hex_to_rgb(h.get(DOM_COLOR_FIELD, "#000000"))) / 441.0),
                         reverse=True
                     )
 
-                # Filtruojame pagal aptiktą objekto tipą (kaip originale)
+                # Paliekame tik to paties objekto tipo kaip 1‑as hitas
                 filtered_hits = [h for h in filtered_hits if h["object_type"] == st.session_state.detected_object_type]
                 st.session_state.search_results = {"hits": filtered_hits}
             else:
                 st.session_state.search_results = {"hits": []}
 
 else:
+    # Teksto paieška
     if search_query.strip():
         with st.spinner("Ieškoma pagal raktažodį..."):
-            results = search_similar_images(search_query)
+            results = marqo_search(search_query)
             if results and results.get("hits"):
                 for hit in results["hits"]:
                     title = hit.get(TITLE_FIELD, hit.get("title", ""))
@@ -239,7 +237,7 @@ results = st.session_state.search_results
 if results and results.get("hits"):
     hits = results["hits"]
 
-    # Jei įkeltas failas + tekstas: papildomai filtruojame pagal tekstą pavadinime
+    # Jei yra ir įkėlimas, ir tekstas – papildomas filtravimas pagal pavadinimą
     if uploaded_file and search_query.strip():
         keyword = search_query.lower()
         hits = [h for h in hits if keyword in (h.get(TITLE_FIELD, h.get("title", "")).lower())]
@@ -260,16 +258,17 @@ if results and results.get("hits"):
         cols = st.columns(3)
         for i, hit in enumerate(page_hits):
             with cols[i % 3]:
-                image_url = hit.get(IMAGE_FIELD, hit.get("image", ""))
-                # Istorinis atvejis (jei indeksuota lokaliai):
-                image_url = image_url.replace("host.docker.internal", "localhost") if isinstance(image_url, str) else image_url
+                img_url = hit.get(IMAGE_FIELD) or hit.get(ALT_IMAGE_FIELD) or hit.get("image")
+                # Senas atvejis: jei kažkur buvo 'host.docker.internal'
+                if isinstance(img_url, str):
+                    img_url = img_url.replace("host.docker.internal", "localhost")
 
                 title = hit.get(TITLE_FIELD, hit.get('title', 'Be pavadinimo'))
                 _id = hit.get('_id', 'Nėra')
                 score = hit.get('_score')
 
-                if image_url:
-                    st.image(image_url, use_container_width=True)
+                if img_url:
+                    st.image(img_url, use_container_width=True)
                 st.write(f"**Pavadinimas:** {title}")
                 st.write(f"**Produkto ID:** {_id}")
                 if isinstance(score, (int, float)):

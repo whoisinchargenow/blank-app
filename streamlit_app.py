@@ -271,16 +271,21 @@ if results_data and results_data.get("hits"):
                 hit_rgb = hex_to_rgb(hit_color_hex)
                 dist = color_distance(query_color, hit_rgb)
                 if dist <= color_threshold + 5:
+                    # Create an adjusted score that factors in color distance
                     hit["_adj_score"] = hit.get('_score', 0) - (dist / 441.0)
                     filtered_by_color.append(hit)
-            # Sort by the adjusted score
-            hits = sorted(filtered_by_color, key=lambda x: x.get("_adj_score", x.get("_score", 0)), reverse=True)
+            hits = filtered_by_color
 
     if uploaded_file and search_query.strip():
         # Additional keyword filter on results
         keyword = search_query.lower()
         hits = [h for h in hits if keyword in (h.get(TITLE_FIELD, h.get("title", "")).lower())]
 
+    # --- UPDATED: Universal Sorting by Similarity Score ---
+    # This single line sorts all results correctly.
+    # It uses the adjusted score for color-filtered images, and the original score for all other cases.
+    hits.sort(key=lambda h: h.get('_adj_score', h.get('_score', 0)), reverse=True)
+    
     # --- Pagination (from local app) ---
     page_size = 9
     total_pages = (len(hits) - 1) // page_size + 1 if hits else 0
@@ -314,6 +319,7 @@ if results_data and results_data.get("hits"):
                 img_url = hit.get(IMAGE_FIELD) or hit.get(ALT_IMAGE_FIELD) or hit.get("image")
                 title = hit.get(TITLE_FIELD, hit.get('title', 'Be pavadinimo'))
                 _id = hit.get('_id', 'Nėra')
+                # Display the original score, even if we sorted by the adjusted one
                 score = hit.get('_score')
 
                 if img_url:

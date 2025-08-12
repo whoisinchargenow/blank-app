@@ -184,7 +184,12 @@ for key, default in (
 
 # --- Sidebar Controls ---
 st.sidebar.header("Paieškos nustatymai")
-uploaded_file = st.sidebar.file_uploader("Pasirinkite paveikslėlį", type=["jpg", "jpeg", "png"], key="uploader")
+# UPDATED: Added more image types including webp
+uploaded_file = st.sidebar.file_uploader(
+    "Pasirinkite paveikslėlį", 
+    type=["jpg", "jpeg", "png", "gif", "bmp", "webp"], 
+    key="uploader"
+)
 search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą:", "")
 color_threshold = st.sidebar.slider(
     "Spalvos panašumo riba", 0, 200, 50, 10,

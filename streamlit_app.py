@@ -36,12 +36,12 @@ CF_ACCESS_CLIENT_ID = "<id>"
 CF_ACCESS_CLIENT_SECRET = "<secret>"
 
 # Cloudflare R2 (S3 suderinama)
-R2_ENDPOINT_URL = "https://a02844df1d7dc6554edd401be979b64a.r2.cloudflarestorage.com"
+R2_ENDPOINT_URL = "https://<account_id>.r2.cloudflarestorage.com"
 R2_ACCESS_KEY_ID = "<r2-access-key>"
 R2_SECRET_ACCESS_KEY = "<r2-secret-key>"
 R2_BUCKET = "streamlit098"
-# Viešas bazinis URL, kuris TIKRAI grąžina objektus (BAIGTIS '/'):
-PUBLIC_BASE_URL = "https://pub-a02844df1d7dc6554edd401be979b64a.r2.dev/streamlit098/"
+# Viešas bazinis URL, kuris TIKRAI grąžina objektus:
+PUBLIC_BASE_URL = "https://pub-3ec323b4b4864664846453a4dda0930e.r2.dev"
 
 REQUIREMENTS (requirements.txt):
 --------------------------------
@@ -59,8 +59,10 @@ boto3
 
 def _cfg(key: str, default: Optional[str] = None) -> Optional[str]:
     try:
+        # Try to get from Streamlit secrets
         return st.secrets[key]  # type: ignore[attr-defined]
     except Exception:
+        # Fallback to environment variables
         return os.getenv(key, default)
 
 MARQO_URL: str = (_cfg("MARQO_URL", "https://marqo.logicafutura.com") or "").rstrip("/")
@@ -72,19 +74,22 @@ ALT_IMAGE_FIELD: str = _cfg("ALT_IMAGE_FIELD", "image_vendor_url") or "image_ven
 DOM_COLOR_FIELD: str = _cfg("DOMINANT_COLOR_FIELD", "dominant_color") or "dominant_color"
 SKU_FIELD: str = _cfg("SKU_FIELD", "sku") or "sku"
 
-CF_ID = _cfg("CF_ACCESS_CLIENT_ID")
-CF_SECRET = _cfg("CF_ACCESS_CLIENT_SECRET")
+# Cloudflare Access Credentials
+CF_ACCESS_CLIENT_ID = _cfg("CF_ACCESS_CLIENT_ID")
+CF_ACCESS_CLIENT_SECRET = _cfg("CF_ACCESS_CLIENT_SECRET")
 
-R2_ENDPOINT_URL: str = _cfg("R2_ENDPOINT_URL", "https://a02844df1d7dc6554edd401be979b64a.r2.cloudflarestorage.com") or "https://a02844df1d7dc6554edd401be979b64a.r2.cloudflarestorage.com"
+# R2 Configuration - UPDATED PUBLIC_BASE_URL
+R2_ENDPOINT_URL: str = _cfg("R2_ENDPOINT_URL") or ""
 R2_ACCESS_KEY_ID: Optional[str] = _cfg("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY: Optional[str] = _cfg("R2_SECRET_ACCESS_KEY")
 R2_BUCKET: str = _cfg("R2_BUCKET", "streamlit098") or "streamlit098"
-PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "https://pub-a02844df1d7dc6554edd401be979b64a.r2.dev/streamlit098/") or "https://pub-a02844df1d7dc6554edd401be979b64a.r2.dev/streamlit098/"
+PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "https://pub-3ec323b4b4864664846453a4dda0930e.r2.dev") or ""
+
 
 HEADERS: Dict[str, str] = {"Content-Type": "application/json"}
-if CF_ID and CF_SECRET:
-    HEADERS["CF-Access-Client-Id"] = CF_ID
-    HEADERS["CF-Access-Client-Secret"] = CF_SECRET
+if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+    HEADERS["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+    HEADERS["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
 
 KNOWN_TYPES = ['table', 'lamp', 'rack', 'chair', 'sofa', 'bench', 'bed', 'cabinet', 'desk']
 
@@ -93,8 +98,8 @@ KNOWN_TYPES = ['table', 'lamp', 'rack', 'chair', 'sofa', 'bench', 'bed', 'cabine
 # -----------------------------
 
 def _r2_client():
-    if not (R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY):
-        raise RuntimeError("R2 prieigos raktai nenurodyti. Įdėkite R2_ACCESS_KEY_ID ir R2_SECRET_ACCESS_KEY į secrets.")
+    if not (R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and R2_ENDPOINT_URL):
+        raise RuntimeError("R2 prieigos raktai arba endpoint URL nenurodyti. Įdėkite R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY ir R2_ENDPOINT_URL į secrets.")
     return boto3.client(
         "s3",
         endpoint_url=R2_ENDPOINT_URL,
@@ -104,13 +109,21 @@ def _r2_client():
 
 
 def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
+    """Uploads an image to R2 and returns its full public URL."""
+    if not PUBLIC_BASE_URL:
+        raise RuntimeError("PUBLIC_BASE_URL is not configured in secrets.")
+        
     ext = os.path.splitext(filename)[1].lower() or ".jpg"
+    # Create a unique key for the object in a 'queries' folder
     key = f"queries/{uuid.uuid4()}{ext}"
     content_type = mimetypes.guess_type(filename)[0] or "image/jpeg"
+    
     r2 = _r2_client()
     r2.put_object(Bucket=R2_BUCKET, Key=key, Body=img_bytes, ContentType=content_type)
-    base = PUBLIC_BASE_URL if PUBLIC_BASE_URL.endswith('/') else PUBLIC_BASE_URL + '/'
-    return base + key
+    
+    # Construct the full public URL
+    base = PUBLIC_BASE_URL.rstrip('/')
+    return f"{base}/{key}"
 
 # -----------------------------
 # Spalvos/objekto tipas pagalbinės
@@ -154,7 +167,7 @@ def detect_object_type(title: str) -> str:
     return "other"
 
 # -----------------------------
-# Marqo paieška (su Access antraštėmis) - FULLY UPDATED
+# Marqo paieška (su Access antraštėmis)
 # -----------------------------
 
 def marqo_search(query: str) -> Optional[Dict[str, Any]]:

@@ -168,11 +168,13 @@ def marqo_search(query: str) -> Optional[Dict[str, Any]]:
 # Streamlit UI
 # -----------------------------
 
-# Set page layout to "centered" for a narrower view
-st.set_page_config(page_title="Vaizdų paieška", layout="centered")
+# Set page layout to "centered" for a narrower view and update page title
+st.set_page_config(page_title="Baldų paieška", layout="centered")
 
-st.title("🖼️ Panašių vaizdų paieška (Marqo)")
-st.markdown("Įkelkite nuotrauką ARBA įveskite raktažodį ir raskite panašius produktus.")
+# UPDATED: New title and icon
+st.title("🛋️ Baldų ir interjero elementų paieška")
+st.markdown("Įkelkite produkto nuotrauką arba įveskite raktažodį, kad rastumėte panašius baldus ir interjero elementus.")
+
 
 # Initialize session state variables
 for key, default in (
@@ -184,7 +186,6 @@ for key, default in (
 
 # --- Sidebar Controls ---
 st.sidebar.header("Paieškos nustatymai")
-# UPDATED: Added more image types including webp
 uploaded_file = st.sidebar.file_uploader(
     "Pasirinkite paveikslėlį", 
     type=["jpg", "jpeg", "png", "gif", "bmp", "webp"], 

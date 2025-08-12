@@ -1,1 +1,6 @@
 streamlit
+requests
+pandas
+numpy
+marqo
+python-dotenv

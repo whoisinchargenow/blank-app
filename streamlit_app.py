@@ -129,20 +129,31 @@ def detect_object_type(title: str) -> str:
     return "other"
 
 # -----------------------------
-# Marqo paieška (su Access antraštėmis)
+# Marqo paieška (su Access antraštėmis) - ACCURACY UPDATE
 # -----------------------------
 
-def marqo_search(query: str) -> Optional[Dict[str, Any]]:
+def marqo_search(query: str, filter_string: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    Performs a search on Marqo, handling errors and displaying full server responses in an expander.
+    Performs a search on Marqo with weighted attributes and optional pre-filtering for accuracy.
     """
+    # Give more weight to the image field to prioritize visual similarity
+    searchable_attributes_with_weights = {
+        IMAGE_FIELD: 1.5,
+        TITLE_FIELD: 1.0
+    }
+
     payload = {
         "limit": 1000,
         "q": query,
         "searchMethod": "TENSOR",
-        "searchableAttributes": [IMAGE_FIELD, TITLE_FIELD],
+        "searchableAttributes": searchable_attributes_with_weights,
         "attributesToRetrieve": ["_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD, SKU_FIELD]
     }
+    
+    # Add the pre-filter if provided
+    if filter_string:
+        payload["filter"] = filter_string
+    
     url = f"{MARQO_URL}/indexes/{INDEX_NAME}/search"
     
     try:
@@ -168,10 +179,7 @@ def marqo_search(query: str) -> Optional[Dict[str, Any]]:
 # Streamlit UI
 # -----------------------------
 
-# Set page layout to "centered" for a narrower view and update page title
 st.set_page_config(page_title="Baldų paieška", layout="centered")
-
-# UPDATED: New title and icon
 st.title("🛋️ Baldų ir interjero elementų paieška")
 st.markdown("Įkelkite produkto nuotrauką arba įveskite raktažodį, kad rastumėte panašius baldus ir interjero elementus.")
 
@@ -205,11 +213,10 @@ if uploaded_file:
     img_bytes = uploaded_file.getvalue()
     current_hash = hash(img_bytes)
 
-    # Trigger search only if the image or color threshold changes
     if current_hash != st.session_state.last_upload_hash or color_threshold != st.session_state.get('last_color_threshold', -1):
         st.session_state.last_upload_hash = current_hash
         st.session_state.last_color_threshold = color_threshold
-        st.session_state.page = 0  # Reset to first page on new search
+        st.session_state.page = 0
 
         try:
             query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
@@ -220,31 +227,34 @@ if uploaded_file:
         query_color = get_dominant_color(img_bytes)
         st.session_state.query_color = query_color
 
-        with st.spinner("Ieškoma panašių vaizdų..."):
-            results = marqo_search(query_url)
-            if results and results.get("hits"):
-                raw_hits = results["hits"]
-                for hit in raw_hits:
-                    title = hit.get(TITLE_FIELD, hit.get("title", ""))
-                    hit["object_type"] = detect_object_type(title)
-                st.session_state.detected_object_type = raw_hits[0]["object_type"] if raw_hits else None
-                st.session_state.search_results = {"hits": raw_hits}
+        # First, detect the object type from the first search result to use as a filter
+        with st.spinner("Analizuojamas paveikslėlis..."):
+            initial_results = marqo_search(query_url)
+            if initial_results and initial_results.get("hits"):
+                first_hit_title = initial_results["hits"][0].get(TITLE_FIELD, "")
+                detected_type = detect_object_type(first_hit_title)
+                st.session_state.detected_object_type = detected_type
+                
+                # Now, perform the main search WITH the pre-filter
+                filter_query = f"object_type:{detected_type}"
+                st.info(f"Ieškoma panašių objektų, priskiriamų tipui: '{detected_type}'")
+                main_results = marqo_search(query_url, filter_string=filter_query)
+                st.session_state.search_results = main_results
             else:
                 st.session_state.search_results = {"hits": []}
 
+
 elif search_query.strip():
-    # Trigger text search
     with st.spinner("Ieškoma pagal raktažodį..."):
-        results = marqo_search(search_query)
+        results = marqo_search(search_query) # Text search does not use pre-filtering
         if results and results.get("hits"):
             for hit in results["hits"]:
                 title = hit.get(TITLE_FIELD, hit.get("title", ""))
                 hit["object_type"] = detect_object_type(title)
-            st.session_state.search_results = {"hits": results["hits"]}
+            st.session_state.search_results = results
         else:
             st.session_state.search_results = {"hits": []}
 else:
-    # Clear results if no input
     st.session_state.search_results = None
     st.session_state.last_upload_hash = None
     st.session_state.query_color = None
@@ -257,36 +267,24 @@ if results_data and results_data.get("hits"):
     hits = results_data["hits"]
 
     # Post-processing filters
-    if uploaded_file:
-        # Filter by object type detected from the uploaded image
-        if st.session_state.detected_object_type:
-            hits = [h for h in hits if h["object_type"] == st.session_state.detected_object_type]
-        
-        # Filter by color similarity
-        if use_color_filter and st.session_state.query_color is not None:
-            query_color = st.session_state.query_color
-            filtered_by_color = []
-            for hit in hits:
-                hit_color_hex = hit.get(DOM_COLOR_FIELD, "#000000")
-                hit_rgb = hex_to_rgb(hit_color_hex)
-                dist = color_distance(query_color, hit_rgb)
-                if dist <= color_threshold + 5:
-                    # Create an adjusted score that factors in color distance
-                    hit["_adj_score"] = hit.get('_score', 0) - (dist / 441.0)
-                    filtered_by_color.append(hit)
-            hits = filtered_by_color
+    if uploaded_file and use_color_filter and st.session_state.query_color is not None:
+        query_color = st.session_state.query_color
+        filtered_by_color = []
+        for hit in hits:
+            hit_color_hex = hit.get(DOM_COLOR_FIELD, "#000000")
+            hit_rgb = hex_to_rgb(hit_color_hex)
+            dist = color_distance(query_color, hit_rgb)
+            if dist <= color_threshold + 5:
+                hit["_adj_score"] = hit.get('_score', 0) - (dist / 441.0)
+                filtered_by_color.append(hit)
+        hits = filtered_by_color
 
     if uploaded_file and search_query.strip():
-        # Additional keyword filter on results
         keyword = search_query.lower()
         hits = [h for h in hits if keyword in (h.get(TITLE_FIELD, h.get("title", "")).lower())]
 
-    # --- UPDATED: Universal Sorting by Similarity Score ---
-    # This single line sorts all results correctly.
-    # It uses the adjusted score for color-filtered images, and the original score for all other cases.
     hits.sort(key=lambda h: h.get('_adj_score', h.get('_score', 0)), reverse=True)
     
-    # --- Pagination (from local app) ---
     page_size = 9
     total_pages = (len(hits) - 1) // page_size + 1 if hits else 0
     current_page = st.session_state.page
@@ -308,7 +306,6 @@ if results_data and results_data.get("hits"):
                 st.session_state.page += 1
                 st.rerun()
 
-        # Display results for the current page
         start = current_page * page_size
         end = start + page_size
         page_hits = hits[start:end]
@@ -319,7 +316,6 @@ if results_data and results_data.get("hits"):
                 img_url = hit.get(IMAGE_FIELD) or hit.get(ALT_IMAGE_FIELD) or hit.get("image")
                 title = hit.get(TITLE_FIELD, hit.get('title', 'Be pavadinimo'))
                 _id = hit.get('_id', 'Nėra')
-                # Display the original score, even if we sorted by the adjusted one
                 score = hit.get('_score')
 
                 if img_url:

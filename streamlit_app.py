@@ -12,52 +12,14 @@ import numpy as np
 from sklearn.cluster import KMeans
 import boto3
 
-"""
-STREAMLIT (streamlit.io) – įkelto vaizdo paieška su Marqo + Cloudflare Access + R2
-=================================================================================
-Ši versija:
-- Leidžia įKELTI vietinį paveikslėlį → įkelia į Cloudflare R2 → gauna viešą URL → naudoja Marqo paieškai.
-- Leidžia paiešką pagal tekstą.
-- Išlaiko pradinę logiką: dominuojanti spalva (KMeans), spalvų filtras/rūšiavimas, objekto tipo filtravimas, puslapiavimas.
-- Autentikuoja į Marqo per Cloudflare Access (Service Token antraštės).
-
-REIKALINGI SLAPTAI RAKTAI (.streamlit/secrets.toml):
-----------------------------------------------------
-MARQO_URL = "https://marqo.logicafutura.com"
-INDEX_NAME = "furniture-index"
-TITLE_FIELD = "title"
-IMAGE_FIELD = "image"
-ALT_IMAGE_FIELD = "image_vendor_url"
-DOMINANT_COLOR_FIELD = "dominant_color"
-SKU_FIELD = "sku"
-
-# Cloudflare Access (privaloma jei Marqo apsaugotas)
-CF_ACCESS_CLIENT_ID = "<id>"
-CF_ACCESS_CLIENT_SECRET = "<secret>"
-
-# Cloudflare R2 (S3 suderinama)
-R2_ENDPOINT_URL = "https://<account_id>.r2.cloudflarestorage.com"
-R2_ACCESS_KEY_ID = "<r2-access-key>"
-R2_SECRET_ACCESS_KEY = "<r2-secret-key>"
-R2_BUCKET = "streamlit098"
-# Viešas bazinis URL, kuris TIKRAI grąžina objektus:
-PUBLIC_BASE_URL = "https://pub-3ec323b4b4864664846453a4dda0930e.r2.dev"
-
-REQUIREMENTS (requirements.txt):
---------------------------------
-streamlit
-requests
-pillow
-numpy
-scikit-learn
-boto3
-"""
+# Streamlit App for Visual Search using Marqo, Cloudflare R2, and Cloudflare Access.
 
 # -----------------------------
 # Konfigūracija (iš secrets arba ENV)
 # -----------------------------
 
 def _cfg(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Retrieves a configuration value from Streamlit secrets or environment variables."""
     try:
         # Try to get from Streamlit secrets
         return st.secrets[key]  # type: ignore[attr-defined]
@@ -78,7 +40,7 @@ SKU_FIELD: str = _cfg("SKU_FIELD", "sku") or "sku"
 CF_ACCESS_CLIENT_ID = _cfg("CF_ACCESS_CLIENT_ID")
 CF_ACCESS_CLIENT_SECRET = _cfg("CF_ACCESS_CLIENT_SECRET")
 
-# R2 Configuration - UPDATED PUBLIC_BASE_URL
+# R2 Configuration
 R2_ENDPOINT_URL: str = _cfg("R2_ENDPOINT_URL") or ""
 R2_ACCESS_KEY_ID: Optional[str] = _cfg("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY: Optional[str] = _cfg("R2_SECRET_ACCESS_KEY")
@@ -184,86 +146,74 @@ def marqo_search(query: str) -> Optional[Dict[str, Any]]:
     url = f"{MARQO_URL}/indexes/{INDEX_NAME}/search"
     
     try:
-        # Make the request
         resp = requests.post(url, json=payload, headers=HEADERS, timeout=60)
-        
-        # Check for HTTP errors (like 4xx or 5xx)
         resp.raise_for_status()
-        
-        # Try to parse the response as JSON
         try:
             return resp.json()
         except json.JSONDecodeError:
-            # This block runs if the server returned a 200 OK status but the body wasn't valid JSON.
             st.error("Gautas sėkmingas atsakymas iš serverio, bet jame nebuvo JSON duomenų.")
-            # Use an expander to show the full, untruncated response
             with st.expander("📄 Rodyti visą serverio atsakymą"):
                 st.code(resp.text, language='html')
             return None
-
     except requests.exceptions.RequestException as e:
-        # This block runs for any network error, timeout, or non-2xx status code (e.g., 403 Forbidden).
         st.error(f"API paieškos klaida: {e}")
-        
-        # Check if a response from the server exists and show it in an expander
         if getattr(e, 'response', None) is not None and e.response.text:
             with st.expander("📄 Rodyti visą serverio atsakymą (neapkarpyta)"):
-                # Use st.code to display the full HTML/text without truncation
                 st.code(e.response.text, language='html')
         else:
             st.warning("Serveris negrąžino jokio atsakymo turinio.")
-            
         return None
 
 # -----------------------------
 # Streamlit UI
 # -----------------------------
 
-st.set_page_config(page_title="Vaizdų paieška", layout="wide")
-st.title("🖼️ Panašių vaizdų paieška (Marqo)")
-st.markdown("Įkelkite nuotrauką ARBA įveskite raktažodį ir raskite panašius produktus iš tiekėjų svetainių.")
+# Set page layout to "centered" for a narrower view
+st.set_page_config(page_title="Vaizdų paieška", layout="centered")
 
-# Būsena
+st.title("🖼️ Panašių vaizdų paieška (Marqo)")
+st.markdown("Įkelkite nuotrauką ARBA įveskite raktažodį ir raskite panašius produktus.")
+
+# Initialize session state variables
 for key, default in (
     ('last_upload_hash', None), ('search_results', None), ('query_color', None),
-    ('current_page', 0), ('detected_object_type', None)
+    ('page', 0), ('detected_object_type', None)
 ):
     if key not in st.session_state:
         st.session_state[key] = default
 
-# Valdikliai
-uploaded_file = st.file_uploader("Pasirinkite paveikslėlį (JPG/PNG)", type=["jpg", "jpeg", "png"], key="uploader")
-search_query = st.text_input("🔍 Ieškoti pagal pavadinimą / tipą / SKU (nebūtina):", "")
+# --- Sidebar Controls ---
+st.sidebar.header("Paieškos nustatymai")
+uploaded_file = st.sidebar.file_uploader("Pasirinkite paveikslėlį", type=["jpg", "jpeg", "png"], key="uploader")
+search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą:", "")
+color_threshold = st.sidebar.slider(
+    "Spalvos panašumo riba", 0, 200, 50, 10,
+    format="%d", help="Kairėje – labiau panaši, dešinėje – mažiau panaši"
+)
+use_color_filter = st.sidebar.checkbox("Įjungti spalvos filtravimą", value=True)
 
-# Pagrindinė logika
+
+# --- Main Logic ---
 if uploaded_file:
-    st.image(uploaded_file, caption="Įkeltas paveikslėlis", width=200)
-    color_threshold = st.slider(
-        "Spalvos panašumo riba", 0, 200, 50, 10,
-        format="%d", help="Kairėje – labiau panaši, dešinėje – mažiau panaši"
-    )
-    use_color_filter = st.checkbox("Įjungti spalvos filtravimą", value=True)
-
+    st.sidebar.image(uploaded_file, caption="Įkeltas paveikslėlis", width=150)
     img_bytes = uploaded_file.getvalue()
     current_hash = hash(img_bytes)
 
+    # Trigger search only if the image or color threshold changes
     if current_hash != st.session_state.last_upload_hash or color_threshold != st.session_state.get('last_color_threshold', -1):
         st.session_state.last_upload_hash = current_hash
         st.session_state.last_color_threshold = color_threshold
-        st.session_state.current_page = 0
+        st.session_state.page = 0  # Reset to first page on new search
 
-        # 1) Įkeliam į R2 ir gaunam VIEŠĄ URL
         try:
             query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
         except Exception as e:
             st.error(f"Nepavyko įkelti į R2: {e}")
             st.stop()
 
-        # 2) Dominuojanti spalva
         query_color = get_dominant_color(img_bytes)
         st.session_state.query_color = query_color
 
-        # 3) Paieška pagal įkelto vaizdo URL
         with st.spinner("Ieškoma panašių vaizdų..."):
             results = marqo_search(query_url)
             if results and results.get("hits"):
@@ -271,65 +221,83 @@ if uploaded_file:
                 for hit in raw_hits:
                     title = hit.get(TITLE_FIELD, hit.get("title", ""))
                     hit["object_type"] = detect_object_type(title)
-
-                st.session_state.detected_object_type = raw_hits[0]["object_type"]
-
-                filtered_hits = raw_hits
-                if use_color_filter:
-                    filtered_hits = []
-                    for hit in raw_hits:
-                        hit_color_hex = hit.get(DOM_COLOR_FIELD, "#000000")
-                        hit_rgb = hex_to_rgb(hit_color_hex)
-                        dist = color_distance(query_color, hit_rgb)
-                        if dist <= color_threshold + 5:
-                            filtered_hits.append(hit)
-
-                    filtered_hits.sort(
-                        key=lambda h: h.get('_score', 0) - (color_distance(query_color, hex_to_rgb(h.get(DOM_COLOR_FIELD, "#000000"))) / 441.0),
-                        reverse=True
-                    )
-
-                filtered_hits = [h for h in filtered_hits if h["object_type"] == st.session_state.detected_object_type]
-                st.session_state.search_results = {"hits": filtered_hits}
+                st.session_state.detected_object_type = raw_hits[0]["object_type"] if raw_hits else None
+                st.session_state.search_results = {"hits": raw_hits}
             else:
                 st.session_state.search_results = {"hits": []}
 
+elif search_query.strip():
+    # Trigger text search
+    with st.spinner("Ieškoma pagal raktažodį..."):
+        results = marqo_search(search_query)
+        if results and results.get("hits"):
+            for hit in results["hits"]:
+                title = hit.get(TITLE_FIELD, hit.get("title", ""))
+                hit["object_type"] = detect_object_type(title)
+            st.session_state.search_results = {"hits": results["hits"]}
+        else:
+            st.session_state.search_results = {"hits": []}
 else:
-    # Teksto paieška
-    if search_query.strip():
-        with st.spinner("Ieškoma pagal raktažodį..."):
-            results = marqo_search(search_query)
-            if results and results.get("hits"):
-                for hit in results["hits"]:
-                    title = hit.get(TITLE_FIELD, hit.get("title", ""))
-                    hit["object_type"] = detect_object_type(title)
-                st.session_state.search_results = {"hits": results["hits"]}
-            else:
-                st.session_state.search_results = {"hits": []}
-    else:
-        st.session_state.search_results = None
-        st.session_state.last_upload_hash = None
-        st.session_state.query_color = None
-        st.session_state.current_page = 0
+    # Clear results if no input
+    st.session_state.search_results = None
+    st.session_state.last_upload_hash = None
+    st.session_state.query_color = None
+    st.session_state.page = 0
 
-# Rezultatų atvaizdavimas
-results = st.session_state.search_results
-if results and results.get("hits"):
-    hits = results["hits"]
+
+# --- Results Rendering ---
+results_data = st.session_state.search_results
+if results_data and results_data.get("hits"):
+    hits = results_data["hits"]
+
+    # Post-processing filters
+    if uploaded_file:
+        # Filter by object type detected from the uploaded image
+        if st.session_state.detected_object_type:
+            hits = [h for h in hits if h["object_type"] == st.session_state.detected_object_type]
+        
+        # Filter by color similarity
+        if use_color_filter and st.session_state.query_color is not None:
+            query_color = st.session_state.query_color
+            filtered_by_color = []
+            for hit in hits:
+                hit_color_hex = hit.get(DOM_COLOR_FIELD, "#000000")
+                hit_rgb = hex_to_rgb(hit_color_hex)
+                dist = color_distance(query_color, hit_rgb)
+                if dist <= color_threshold + 5:
+                    hit["_adj_score"] = hit.get('_score', 0) - (dist / 441.0)
+                    filtered_by_color.append(hit)
+            # Sort by the adjusted score
+            hits = sorted(filtered_by_color, key=lambda x: x.get("_adj_score", x.get("_score", 0)), reverse=True)
 
     if uploaded_file and search_query.strip():
+        # Additional keyword filter on results
         keyword = search_query.lower()
         hits = [h for h in hits if keyword in (h.get(TITLE_FIELD, h.get("title", "")).lower())]
 
+    # --- Pagination (from local app) ---
     page_size = 9
     total_pages = (len(hits) - 1) // page_size + 1 if hits else 0
-    current_page = st.session_state.current_page
+    current_page = st.session_state.page
 
-    if total_pages == 0:
-        st.info("Rezultatų nerasta. Pabandykite įkelti kitą paveikslėlį arba įvesti kitą raktažodį.")
+    if not hits:
+        st.info("Rezultatų nerasta. Pabandykite įkelti kitą paveikslėlį arba pakeisti filtrus.")
     else:
-        st.subheader(f"✅ Rodymas: puslapis {current_page + 1} iš {total_pages}")
+        st.subheader(f"Rasta rezultatų: {len(hits)}")
+        
+        col_prev, col_pg, col_next = st.columns([2, 8, 2])
+        with col_prev:
+            if st.button("⬅ Ankstesnis", disabled=(current_page == 0)):
+                st.session_state.page -= 1
+                st.rerun()
+        with col_pg:
+             st.markdown(f"<div style='text-align: center;'>Puslapis {current_page + 1} iš {total_pages}</div>", unsafe_allow_html=True)
+        with col_next:
+            if st.button("Kitas ➡", disabled=(current_page >= total_pages - 1)):
+                st.session_state.page += 1
+                st.rerun()
 
+        # Display results for the current page
         start = current_page * page_size
         end = start + page_size
         page_hits = hits[start:end]
@@ -344,31 +312,13 @@ if results and results.get("hits"):
 
                 if img_url:
                     st.image(img_url, use_container_width=True)
-                st.write(f"**Pavadinimas:** {title}")
-                st.write(f"**Produkto ID:** {_id}")
+                st.write(f"**{title}**")
+                st.caption(f"ID: {_id}")
                 if isinstance(score, (int, float)):
-                    st.write(f"**Panašumo įvertinimas:** {score:.2f}")
+                    st.write(f"Panašumas: {score:.2f}")
+                st.markdown("---")
 
-        col1, col2, col3 = st.columns([1, 5, 1])
-        with col1:
-            if current_page > 0:
-                if st.button("⬅ Ankstesnis"):
-                    st.session_state.current_page -= 1
-                    st.rerun()
-        with col2:
-            visible_pages = list(range(current_page, min(current_page + 8, total_pages)))
-            if visible_pages:
-                btn_cols = st.columns(len(visible_pages))
-                for i, p in enumerate(visible_pages):
-                    if btn_cols[i].button(str(p + 1)):
-                        st.session_state.current_page = p
-                        st.rerun()
-            else:
-                st.info("Rezultatų nerasta. Bandykite kitą puslapį.")
-        with col3:
-            if current_page < total_pages - 1:
-                if st.button("Kitas ➡"):
-                    st.session_state.current_page += 1
-                    st.rerun()
-else:
+elif results_data is not None:
     st.info("Rezultatų nerasta. Pabandykite įkelti paveikslėlį arba įvesti raktažodį.")
+else:
+    st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę šoninėje juostoje.")

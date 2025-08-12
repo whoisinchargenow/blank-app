@@ -1,7 +1,6 @@
 streamlit
 requests
-pandas
+pillow
 numpy
-marqo
-python-dotenv
 scikit-learn
+boto3

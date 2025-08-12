@@ -154,10 +154,13 @@ def detect_object_type(title: str) -> str:
     return "other"
 
 # -----------------------------
-# Marqo paieška (su Access antraštėmis)
+# Marqo paieška (su Access antraštėmis) - FULLY UPDATED
 # -----------------------------
 
 def marqo_search(query: str) -> Optional[Dict[str, Any]]:
+    """
+    Performs a search on Marqo, handling errors and displaying full server responses in an expander.
+    """
     payload = {
         "limit": 1000,
         "q": query,
@@ -166,21 +169,37 @@ def marqo_search(query: str) -> Optional[Dict[str, Any]]:
         "attributesToRetrieve": ["_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD, SKU_FIELD]
     }
     url = f"{MARQO_URL}/indexes/{INDEX_NAME}/search"
+    
     try:
+        # Make the request
         resp = requests.post(url, json=payload, headers=HEADERS, timeout=60)
-        preview = (resp.text or "")[:200]
+        
+        # Check for HTTP errors (like 4xx or 5xx)
         resp.raise_for_status()
+        
+        # Try to parse the response as JSON
         try:
             return resp.json()
-        except ValueError:
-            st.error("Gautas ne JSON atsakymas iš Marqo (gal Cloudflare Access HTML). Patikrinkite CF_ACCESS_* reikšmes.")
-            if preview:
-                st.code(preview)
+        except json.JSONDecodeError:
+            # This block runs if the server returned a 200 OK status but the body wasn't valid JSON.
+            st.error("Gautas sėkmingas atsakymas iš serverio, bet jame nebuvo JSON duomenų.")
+            # Use an expander to show the full, untruncated response
+            with st.expander("📄 Rodyti visą serverio atsakymą"):
+                st.code(resp.text, language='html')
             return None
+
     except requests.exceptions.RequestException as e:
-        server_response = e.response.text[:200] if getattr(e, 'response', None) is not None else "Serveris neatsako."
+        # This block runs for any network error, timeout, or non-2xx status code (e.g., 403 Forbidden).
         st.error(f"API paieškos klaida: {e}")
-        st.error(f"Serverio atsakymas: {server_response}")
+        
+        # Check if a response from the server exists and show it in an expander
+        if getattr(e, 'response', None) is not None and e.response.text:
+            with st.expander("📄 Rodyti visą serverio atsakymą (neapkarpyta)"):
+                # Use st.code to display the full HTML/text without truncation
+                st.code(e.response.text, language='html')
+        else:
+            st.warning("Serveris negrąžino jokio atsakymo turinio.")
+            
         return None
 
 # -----------------------------

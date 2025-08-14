@@ -77,21 +77,74 @@ KNOWN_TYPES = [
 
 # Rich keyword map to catch synonyms/variants for inference & filtering
 TYPE_KEYWORDS = {
-    "lamp": ["lamp", "light", "wall lamp", "floor lamp", "table lamp", "pendant", "chandelier", "sconce", "wall light"],
-    "table": ["table", "coffee table", "side table", "console table", "dining table"],
-    "sofa": ["sofa", "couch", "loveseat", "sectional"],
-    "chair": ["chair", "armchair", "stool"],
-    "bench": ["bench"],
-    "rack": ["rack", "shelf", "shelving"],
-    "bed": ["bed"],
-    "cabinet": ["cabinet"],
-    "desk": ["desk"],
-    "trolley": ["trolley", "bar cart"],
-    "mirror": ["mirror"],
-    "vase": ["vase"],
+    # Fireplace & accessories
+    "andiron": ["andiron", "fire dog", "firedog"],
+    "fire tools": ["fire tools", "fireplace tools", "fire poker", "fireplace set"],
+
+    # Botanicals
+    "artificial flowers & plants": ["artificial flowers", "faux flowers", "faux plants", "artificial plant", "silk flowers", "artificial greenery", "artificial palm"],
+
+    # Small objects & decor
+    "ashtray": ["ashtray"],
+    "basket": ["basket", "wicker basket", "storage basket"],
+    "bowl": ["bowl", "decorative bowl"],
+    "box": ["box", "storage box", "decorative box"],
+    "bust": ["bust", "sculpture bust", "head sculpture"],
+    "candle holder": ["candle holder", "candlestick", "candelabra", "tealight holder", "tea light holder"],
+    "decanter": ["decanter", "carafe", "wine decanter"],
+    "desk accessory": ["desk accessory", "desk organizer", "pen holder", "paper tray"],
+    "globe": ["globe", "world globe"],
+    "hurricane": ["hurricane", "hurricane lamp", "hurricane candle holder"],
+    "jar": ["jar", "storage jar", "ginger jar"],
+    "lighter holder": ["lighter holder", "lighter case"],
+    "object": ["object", "decorative object", "decor object"],
+    "picture frame": ["picture frame", "photo frame"],
+    "plaid": ["plaid", "throw", "blanket", "tartan throw"],
+    "planter": ["planter", "flower pot", "plant pot", "cachepot"],
+    "pouf": ["pouf", "pouffe"],
+    "print": ["print", "art print", "poster"],
+    "sculpture": ["sculpture", "statue", "figurine"],
+    "stand": ["stand", "display stand", "pedestal stand"],
     "tray": ["tray"],
-    "rug": ["rug", "carpet"]
+    "umbrella stand": ["umbrella stand"],
+    "vase": ["vase"],
+    "wall art": ["wall art", "wall print", "wall picture"],
+    "wall decoration": ["wall decoration", "wall decor", "wall ornament"],
+    "wine cooler": ["wine cooler", "wine chiller"],
+    "wine rack": ["wine rack", "bottle rack"],
+
+    # Furniture
+    "bar": ["bar", "bar table", "bar furniture", "home bar", "bar cabinet", "bar counter"],
+    "bed": ["bed", "bedframe", "bed frame"],
+    "bench": ["bench", "entryway bench", "bedroom bench"],
+    "cabinet": ["cabinet", "storage cabinet", "display cabinet"],
+    "cake standard": ["cake standard", "cake stand"],
+    "chair": ["chair", "armchair", "dining chair", "side chair"],
+    "coatrack": ["coat rack", "coatrack", "coat stand", "hall stand"],
+    "column": ["column", "pedestal"],
+    "cushion": ["cushion", "pillow", "throw pillow"],
+    "daybed": ["daybed", "chaise lounge", "chaise longue"],
+    "desk": ["desk", "writing desk"],
+    "dresser": ["dresser", "chest of drawers", "drawer chest"],
+    "headboard": ["headboard", "bed headboard"],
+    "lamp": ["lamp", "light", "wall lamp", "floor lamp", "table lamp", "pendant", "chandelier", "sconce", "wall light"],
+    "lantern": ["lantern", "candle lantern"],
+    "mirror": ["mirror", "wall mirror"],
+    "nightstand": ["nightstand", "bedside table", "bedside cabinet"],
+    "ottoman": ["ottoman", "footstool", "foot stool"],
+    "rug": ["rug", "carpet"],
+    "sofa": ["sofa", "couch", "loveseat", "sectional"],
+    "stool": ["stool", "bar stool", "counter stool"],
+    "table": ["table", "coffee table", "side table", "console table", "dining table"],
+    "trolley": ["trolley", "bar cart", "serving cart"],
+    "trunk": ["trunk", "storage trunk"],
+    "tv cabinet": ["tv cabinet", "tv stand", "media console", "media unit"],
+    "wall rack": ["wall rack", "wall shelf", "wall-mounted rack"],
 }
+
+# Search attribute sets for dual-search fusion
+TEXT_ATTRS = [TITLE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD, SEARCH_BLOB_FIELD]
+VISUAL_ATTRS = [IMAGE_FIELD]
 
 # Search attribute sets for dual-search fusion
 TEXT_ATTRS = [TITLE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD, SEARCH_BLOB_FIELD]

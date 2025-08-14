@@ -67,6 +67,88 @@ PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "") or ""
 KNOWN_TENSOR_FIELDS = {"image", "name", "description", "spec_text", "search_blob"}
 
 
+# ---- Product type support (to narrow results) ----
+TYPE_FIELDS = ["product_type", "type", "object_type", "category"]
+TYPES_ALL = [
+    "Visi",
+    "Andiron",
+    "Artificial Flowers & Plants",
+    "Ashtray",
+    "Bar",
+    "Basket",
+    "Bed",
+    "Bench",
+    "Bookend",
+    "Bowl",
+    "Box",
+    "Bust",
+    "Cabinet",
+    "Cake Standard",
+    "Candle Holder",
+    "Chair",
+    "Coatrack",
+    "Column",
+    "Cushion",
+    "Daybed",
+    "Decanter",
+    "Desk",
+    "Desk Accessory",
+    "Dresser",
+    "Fire Tools",
+    "Folding Screen",
+    "Globe",
+    "Headboard",
+    "Hurricane",
+    "Jar",
+    "Lamp",
+    "Lantern",
+    "Lighter holder",
+    "Mirror",
+    "Nightstand",
+    "Object",
+    "Ottoman",
+    "Picture Frame",
+    "Plaid",
+    "Planter",
+    "Pouf",
+    "Print",
+    "Rug",
+    "Sculpture",
+    "Sofa",
+    "Stand",
+    "Stool",
+    "Table",
+    "Tray",
+    "Trolley",
+    "Trunk",
+    "TV Cabinet",
+    "Umbrella Stand",
+    "Vase",
+    "Wall Art",
+    "Wall Decoration",
+    "Wall Rack",
+    "Wine Cooler",
+    "Wine Rack",
+]
+
+def filter_by_type(hits: List[Dict[str, Any]], selected_type: Optional[str]) -> List[Dict[str, Any]]:
+    if not hits or not selected_type or selected_type == "Visi":
+        return hits
+    tsel = selected_type.lower()
+    out: List[Dict[str, Any]] = []
+    for h in hits:
+        ty = get_hit_field(h, *TYPE_FIELDS) if 'get_hit_field' in globals() else (h.get('product_type') or h.get('type') or h.get('object_type') or h.get('category'))
+        if isinstance(ty, str) and tsel in ty.lower():
+            out.append(h)
+            continue
+        # Fallback to check common text fields
+        name = (h.get('name') or h.get('title') or "").lower()
+        desc = (h.get('description') or "").lower()
+        blob = (h.get('search_blob') or "").lower()
+        if tsel in name or tsel in desc or tsel in blob:
+            out.append(h)
+    return out
+
 def get_hit_field(hit: Dict[str, Any], *names: str) -> Optional[Any]:
     """Safely get a field from different possible locations in Marqo hits.
     Checks top-level, then 'fields', then 'document'. Returns first non-empty value.
@@ -316,6 +398,8 @@ def marqo_search(q: str, limit: int = 200, attrs: Optional[List[str]] = None, me
             "_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD,
             DOM_COLOR_FIELD, SKU_FIELD, "product_id", "sku", "SKU", CLICK_URL_FIELD,
             DESCRIPTION_FIELD, SEARCH_BLOB_FIELD,
+            # include possible type fields for client-side narrowing
+            "product_type", "type", "object_type", "category",
         ],
     }
     url = f"{MARQO_URL}/indexes/{INDEX_NAME}/search"
@@ -458,6 +542,12 @@ search_query = st.sidebar.text_input(
         "Jei įkelta nuotrauka, tekstas susiaurina vizualiai rastus rezultatus; jei nuotraukos nėra – ieško tik pagal tekstą."
     ),
 key="search_text",
+)
+
+# Optional: narrow by product type
+selected_type = st.sidebar.selectbox(
+    "Produkto tipas (pasirinktinai)", TYPES_ALL, index=0,
+    help="Apribokite rezultatus iki pasirinktos kategorijos.",
 )
 
 # Tekstinės paieškos atveju rodyti spalvų parinkiklį
@@ -632,6 +722,9 @@ else:
     # Initial state: no image — hide colour controls
     st.session_state.color_filter_hidden = True
     st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę.")
+
+# Before rendering, apply optional type narrowing
+final_hits = filter_by_type(final_hits, selected_type)
 
 # =============================================================
 # Render Results

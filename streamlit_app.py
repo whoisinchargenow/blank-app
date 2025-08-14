@@ -75,7 +75,7 @@ def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
         return None
 
 def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None, method: str = "TENSOR") -> Optional[Dict[str, Any]]:
-    # FIX: Harden this function by ensuring searchableAttributes is never None.
+    # This function is hardened to prevent 400 errors from missing attributes.
     searchable_attrs = attrs
     if searchable_attrs is None:
         searchable_attrs = [TITLE_FIELD, SEARCH_BLOB_FIELD]
@@ -95,7 +95,7 @@ def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, 
         st.error(f"API search error: {e.response.text if e.response else e}")
         return None
 
-# FIX: Restore the missing fuse_hits function.
+# FIX: The missing fuse_hits function has been restored.
 def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], alpha: float = 0.7) -> List[Dict[str, Any]]:
     """Weighted late-fusion of two hit lists by _id."""
     def to_map(hits):
@@ -187,14 +187,15 @@ if uploaded_file:
         except Exception as e:
             st.error(f"Failed to upload image: {e}"); st.stop()
         
-        vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD], filter_string=color_filter_string)
-        sem_res = marqo_search(query_url, attrs=[SEARCH_BLOB_FIELD], filter_string=color_filter_string)
+        vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD], filter_string=color_filter_string, method="TENSOR")
+        sem_res = marqo_search(query_url, attrs=[SEARCH_BLOB_FIELD], filter_string=color_filter_string, method="TENSOR")
         
         vis_hits = vis_res.get("hits", []) if vis_res else []
         sem_hits = sem_res.get("hits", []) if sem_res else []
         image_search_results = fuse_hits(vis_hits, sem_hits)
 
         if search_query.strip():
+            # You must re-index with "name" as a non-tensor field for this to work
             txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD], method="LEXICAL")
             text_search_hits = txt_res.get("hits", []) if txt_res else []
             
@@ -208,6 +209,7 @@ if uploaded_file:
 # --- Main Logic Branch: Text-Only Search ---
 elif search_query.strip():
     with st.spinner("Searching by text..."):
+        # You must re-index with "name" as a non-tensor field for this to work
         txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD], method="LEXICAL")
         final_hits = txt_res.get("hits", []) if txt_res else []
 

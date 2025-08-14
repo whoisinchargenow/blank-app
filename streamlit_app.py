@@ -63,6 +63,35 @@ PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "") or ""
 # Helpers
 # =============================================================
 
+# Known tensor fields present in your index (adjust if you add more)
+KNOWN_TENSOR_FIELDS = {"image", "name", "description", "spec_text", "search_blob"}
+
+
+def sanitize_attrs(attrs: Optional[List[str]], *, for_method: str) -> List[str]:
+    """Map aliases and drop unknown fields to avoid 400s from Marqo.
+    - maps 'title' -> 'name'
+    - removes attributes not in KNOWN_TENSOR_FIELDS
+    - for LEXICAL, defaults to textual fields
+    - for TENSOR image queries, you can pass [IMAGE_FIELD]
+    """
+    if attrs is None:
+        if for_method.upper() == "LEXICAL":
+            attrs = [TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
+        else:
+            attrs = [IMAGE_FIELD, TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
+    clean: List[str] = []
+    for a in attrs:
+        if not a:
+            continue
+        a = a.strip()
+        if a == "title":
+            a = "name"
+        if a in KNOWN_TENSOR_FIELDS and a not in clean:
+            clean.append(a)
+    if not clean:
+        clean = [IMAGE_FIELD] if for_method.upper() == "TENSOR" else [TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
+    return clean
+
 def to_hex(rgb: np.ndarray | Tuple[int, int, int]) -> str:
     r, g, b = [int(max(0, min(255, v))) for v in (rgb if isinstance(rgb, (list, tuple, np.ndarray)) else (0, 0, 0))]
     return f"#{r:02x}{g:02x}{b:02x}"
@@ -189,7 +218,9 @@ def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
 # Marqo search (HTTP API)
 
 def marqo_search(q: str, limit: int = 200, attrs: Optional[List[str]] = None, method: str = "TENSOR") -> Optional[Dict[str, Any]]:
-    searchable_attrs = attrs or [IMAGE_FIELD, TITLE_FIELD, SEARCH_BLOB_FIELD]
+    method = (method or "TENSOR").upper()
+    searchable_attrs = sanitize_attrs(attrs, for_method=method)
+
     payload: Dict[str, Any] = {
         "limit": limit,
         "q": q,
@@ -197,8 +228,8 @@ def marqo_search(q: str, limit: int = 200, attrs: Optional[List[str]] = None, me
         "searchableAttributes": searchable_attrs,
         "attributesToRetrieve": [
             "_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD,
-            DOM_COLOR_FIELD, SKU_FIELD, CLICK_URL_FIELD, "_score",
-            DESCRIPTION_FIELD, SEARCH_BLOB_FIELD
+            DOM_COLOR_FIELD, SKU_FIELD, CLICK_URL_FIELD,
+            DESCRIPTION_FIELD, SEARCH_BLOB_FIELD,
         ],
     }
     url = f"{MARQO_URL}/indexes/{INDEX_NAME}/search"
@@ -207,13 +238,16 @@ def marqo_search(q: str, limit: int = 200, attrs: Optional[List[str]] = None, me
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"API search error: {e.response.text if e.response else e}")
+        msg = e.response.text if getattr(e, "response", None) is not None else str(e)
+        st.error("API search error")
+        with st.expander("📄 Server response"):
+            st.code(msg, language="json")
         return None
 
 
 # Weighted late fusion (image-first)
 
-def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], alpha: float = 0.85) -> List[Dict[str, Any]]:
+def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], alpha: float = 0.88) -> List[Dict[str, Any]]:
     def to_map(hits):
         return {h.get('_id'): float(h.get('_score', 0.0)) for h in hits}
     imap, tmap = to_map(img_hits), to_map(txt_hits)
@@ -342,8 +376,8 @@ if uploaded_file:
             st.stop()
 
         # Visual-only and text-fields tensor searches (no server-side colour filter)
-        vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD])
-        sem_res = marqo_search(query_url, attrs=[SEARCH_BLOB_FIELD])
+        vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD], method="TENSOR")
+        sem_res = marqo_search(query_url, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
 
         vis_hits = vis_res.get("hits", []) if vis_res else []
         sem_hits = sem_res.get("hits", []) if sem_res else []
@@ -351,7 +385,7 @@ if uploaded_file:
 
         if search_query.strip():
             # Lexical text search to refine
-            txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], method="LEXICAL")
+            txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="LEXICAL")
             text_hits = txt_res.get("hits", []) if txt_res else []
             text_ids = {h.get('_id') for h in text_hits}
             final_hits = [h for h in image_search_results if h.get('_id') in text_ids]
@@ -388,7 +422,7 @@ elif search_query.strip():
     st.session_state.color_controls_rerolled = False
 
     with st.spinner("Searching by text..."):
-        txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], method="LEXICAL")
+        txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="LEXICAL")
         final_hits = txt_res.get("hits", []) if txt_res else []
 
 # --- Initial State ---

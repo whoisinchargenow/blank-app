@@ -341,7 +341,14 @@ for k, v in (
 
 # Sidebar
 st.sidebar.header("Paieškos nustatymai")
-uploaded_file = st.sidebar.file_uploader("Pasirinkite paveikslėlį", type=["jpg", "jpeg", "png", "webp"])
+st.sidebar.markdown("**📤 Įkelkite paveikslėlį**")
+st.sidebar.caption("Vilkite ir numeskite arba pasirinkite failą iš kompiuterio.")
+uploaded_file = st.sidebar.file_uploader(
+    "Įkelkite paveikslėlį",
+    type=["jpg", "jpeg", "png", "webp"],
+    label_visibility="collapsed",
+    help="Leidžiami formatai: JPG, JPEG, PNG, WEBP"
+)
 search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą")
 
 # --- Early reset: if a NEW image is uploaded, unhide colour controls BEFORE rendering them

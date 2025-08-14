@@ -345,22 +345,44 @@ uploaded_file = st.sidebar.file_uploader("Choose an image", type=["jpg", "jpeg",
 search_query = st.sidebar.text_input("🔍 Search by text")
 
 # --- Early reset: if a NEW image is uploaded, unhide colour controls BEFORE rendering them
+is_new_upload = False
 if uploaded_file:
     try:
         _img_preview_bytes = uploaded_file.getvalue()
         _img_hash = hash(_img_preview_bytes)
-        if st.session_state.get('last_upload_hash') != _img_hash:
+        prev_hash = st.session_state.get('last_upload_hash')
+        is_new_upload = (_img_hash != prev_hash)
+        if is_new_upload:
             st.session_state['last_upload_hash'] = _img_hash
             st.session_state['color_filter_hidden'] = False
             st.session_state['color_controls_rerolled'] = False
     except Exception:
-        pass
+        is_new_upload = False
+else:
+    is_new_upload = False
 
 # Colour controls: visible only when an image is uploaded
 if uploaded_file:
     if st.session_state.get('color_filter_hidden', False):
         use_color_filter = False
         color_threshold = 50
+    else:
+        # Default OFF on a brand new upload, persist state via widget keys
+        default_checked = False if is_new_upload else st.session_state.get('color_filter_checked', False)
+        use_color_filter = st.sidebar.checkbox(
+            "Enable color filtering",
+            value=default_checked,
+            key="color_filter_checked",
+        )
+        color_threshold = st.sidebar.slider(
+            "Color similarity threshold", 0, 150,
+            st.session_state.get('color_threshold', 50), 10,
+            key="color_threshold",
+        )
+else:
+    # No image uploaded: hide and turn off colour filter
+    use_color_filter = False
+    color_threshold = 50
     else:
         use_color_filter = st.sidebar.checkbox("Enable color filtering", value=True)
         color_threshold = st.sidebar.slider("Color similarity threshold", 0, 150, 50, 10)

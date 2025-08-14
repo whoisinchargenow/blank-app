@@ -367,11 +367,12 @@ if uploaded_file:
         use_color_filter = False
         color_threshold = 50
     else:
-        # Default OFF on a brand new upload, persist state via widget keys
-        default_checked = False if is_new_upload else st.session_state.get('color_filter_checked', False)
+        # Default ON on a brand new upload
+        if is_new_upload:
+            st.session_state['color_filter_checked'] = True
         use_color_filter = st.sidebar.checkbox(
             "Enable color filtering",
-            value=default_checked,
+            value=st.session_state.get('color_filter_checked', True),
             key="color_filter_checked",
         )
         color_threshold = st.sidebar.slider(

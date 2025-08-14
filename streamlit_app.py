@@ -571,7 +571,7 @@ if final_hits:
             elif img_url:
                 st.image(img_url, use_container_width=True)
             if sku:
-                st.write(f"**{title}** · SKU: `{sku}`")
+                st.write(f"**{title}** · `{sku}`")
             else:
                 st.write(f"**{title}**")
             if isinstance(score, (int, float)):

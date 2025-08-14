@@ -447,7 +447,7 @@ if final_hits:
     st.session_state.last_hit_count = len(final_hits)
 
     st.subheader(f"Found {len(final_hits)} results")
-    page_size = 9
+    page_size = 50  # 5 per row × 10 rows per page
     total_pages = (len(final_hits) - 1) // page_size + 1
     current_page = st.session_state.page
 
@@ -457,9 +457,9 @@ if final_hits:
     end_idx = start_idx + page_size
     page_hits = final_hits[start_idx:end_idx]
 
-    cols = st.columns(3)
+    cols = st.columns(5)
     for i, h in enumerate(page_hits):
-        with cols[i % 3]:
+        with cols[i % 5]:
             img_url = h.get(IMAGE_FIELD) or h.get(ALT_IMAGE_FIELD) or h.get("image")
             title = h.get(TITLE_FIELD, h.get('title', 'No title'))
             click_url = h.get(CLICK_URL_FIELD)

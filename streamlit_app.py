@@ -576,8 +576,6 @@ if final_hits:
                 st.write(f"**{title}**")
             if isinstance(score, (int, float)):
                 st.caption(f"Panašumas: {score:.3f}")
-            if click_url:
-                st.markdown(f"[🔗 Atidaryti produktą]({click_url})")
             if isinstance(dom_color_hex, str) and len(dom_color_hex) >= 4:
                 st.markdown(
                     f'<div style="display:flex;align-items:center;gap:8px">'

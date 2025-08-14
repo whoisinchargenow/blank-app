@@ -106,6 +106,11 @@ def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
 # Color helpers (for analyzing the query image)
 # =============================================================
 
+def to_hex(rgb) -> str:
+    """Converts an RGB tuple or list to a hex string."""
+    r, g, b = [int(max(0, min(255, v))) for v in rgb]
+    return f"#{r:02x}{g:02x}{b:02x}"
+
 def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
     """Estimate the dominant object colour of the query image."""
     try:
@@ -204,7 +209,6 @@ uploaded_file = st.sidebar.file_uploader(
 )
 search_query = st.sidebar.text_input("🔍 Search by text:", "")
 
-# --- MODIFIED: Simplified color filter controls ---
 use_color_filter = st.sidebar.checkbox("Enable color filtering", value=True)
 color_threshold = st.sidebar.slider("Color similarity threshold", 0, 150, 50, 10)
 
@@ -215,7 +219,7 @@ text_weight = 0.35 if search_query.strip() else 0.0
 results_payload: Optional[Dict[str, Any]] = None
 final_hits = []
 
-# --- MODIFIED: Main search logic with pre-filtering ---
+# Main search logic with pre-filtering
 if uploaded_file:
     st.sidebar.image(uploaded_file, caption="Uploaded Image", width=180)
     img_bytes = uploaded_file.getvalue()
@@ -240,7 +244,15 @@ if uploaded_file:
                 f"color_g:[{g_min} TO {g_max}] AND "
                 f"color_b:[{b_min} TO {b_max}])"
             )
-            st.sidebar.info(f"Filtering for colors near RGB({r}, {g}, {b})")
+            
+            # --- MODIFIED: Display the dominant color swatch in the sidebar ---
+            hex_color = to_hex(query_rgb)
+            st.sidebar.markdown(f"""
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-family: 'Source Sans Pro', sans-serif; color: #262730;">
+                <span style="font-size: 0.9rem;">Filtering by dominant color:</span>
+                <div style="width: 25px; height: 25px; background-color: {hex_color}; border: 1px solid #ccc; border-radius: 4px;"></div>
+            </div>
+            """, unsafe_allow_html=True)
 
     with st.spinner("Searching for visually similar items..."):
         vis_res = marqo_search(query_url, limit=200, attrs=[IMAGE_FIELD], filter_string=color_filter_string)
@@ -273,7 +285,7 @@ if final_hits:
     
     # Pagination
     page_size = 9
-    total_pages = (len(final_hits) - 1) // page_size + 1
+    total_pages = (len(final_hits) - 1) // page_size + 1 if final_hits else 0
     current_page = st.session_state.page
 
     # Ensure current_page is valid

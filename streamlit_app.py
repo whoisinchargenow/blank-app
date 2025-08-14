@@ -383,13 +383,6 @@ else:
     # No image uploaded: hide and turn off colour filter
     use_color_filter = False
     color_threshold = 50
-    else:
-        use_color_filter = st.sidebar.checkbox("Enable color filtering", value=True)
-        color_threshold = st.sidebar.slider("Color similarity threshold", 0, 150, 50, 10)
-else:
-    # No image uploaded: hide and turn off colour filter
-    use_color_filter = False
-    color_threshold = 50
 
 final_hits: List[Dict[str, Any]] = []
 

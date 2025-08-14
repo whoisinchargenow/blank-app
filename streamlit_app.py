@@ -262,7 +262,12 @@ def get_dominant_color(image_bytes: bytes) -> np.ndarray:
             mx, mn = float(np.max(mean_rgb)), float(np.min(mean_rgb))
             sat = 0.0 if mx == 0 else (mx - mn) / mx
             scores.append(idx.mean() * (sat + 0.05))
-        best
+        best = int(np.argmax(scores))
+        color = np.clip((centers[best] * 255.0).round().astype(int), 0, 255)
+        return color
+    except Exception as e:
+        st.warning(f"Nepavyko nustatyti objekto spalvos: {e}")
+        return np.array([0, 0, 0])
 
 
 def hex_to_rgb(hex_color: str) -> np.ndarray:

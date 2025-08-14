@@ -209,20 +209,7 @@ def canonicalize_type(t: Optional[str]) -> Optional[str]:
 
 
 def infer_type_from_hit(hit: Dict[str, Any]) -> Optional[str]:
-    # Prefer explicit field if present
-    val = hit.get(OBJECT_TYPE_FIELD)
-    if isinstance(val, str) and val:
-        return canonicalize_type(val)
-    # Otherwise infer from title/description/spec
-    title = hit.get(TITLE_FIELD, hit.get("title", ""))
-    desc = hit.get(DESCRIPTION_FIELD, "")
-    spec = hit.get(SPEC_TEXT_FIELD, "")
-    for candidate in (title, desc, spec):
-        t = infer_type_from_text(candidate)
-        t = canonicalize_type(t)
-        if t:
-            return t
-    return None
+
     # Prefer explicit field if present
     val = hit.get(OBJECT_TYPE_FIELD)
     if isinstance(val, str) and val:
@@ -440,10 +427,6 @@ if uploaded_file:
                 if inferred:
                     img_vis_hits = postfilter_hits_by_type(img_vis_hits, inferred)
                     img_sem_hits = postfilter_hits_by_type(img_sem_hits, inferred)
-            img_sem = marqo_search(query_url, limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
-            img_vis_hits = img_vis.get("hits", []) if img_vis else []
-            img_sem_hits = img_sem.get("hits", []) if img_sem else []
-
             # If OBJECT_TYPE is missing from index, post-filter by keywords
             if inferred:
                 if not img_vis_hits or (img_vis_hits and OBJECT_TYPE_FIELD not in img_vis_hits[0]):

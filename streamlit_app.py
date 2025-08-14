@@ -375,31 +375,31 @@ if uploaded_file:
                 filter_query = f'{OBJECT_TYPE_FIELD}:"{inferred}"'
 
             # Step 2: run two searches for controllable boosting: visual-only and semantic (text fields)
-img_vis = marqo_search(query_url, limit=200, filter_string=filter_query, attrs=VISUAL_ATTRS)
-img_sem = marqo_search(query_url, limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
-img_vis_hits = img_vis.get("hits", []) if img_vis else []
-img_sem_hits = img_sem.get("hits", []) if img_sem else []
+            img_vis = marqo_search(query_url, limit=200, filter_string=filter_query, attrs=VISUAL_ATTRS)
+            img_sem = marqo_search(query_url, limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
+            img_vis_hits = img_vis.get("hits", []) if img_vis else []
+            img_sem_hits = img_sem.get("hits", []) if img_sem else []
 
-# If OBJECT_TYPE is missing from index, post-filter by keywords
-if inferred:
-    if not img_vis_hits or (img_vis_hits and OBJECT_TYPE_FIELD not in img_vis_hits[0]):
-        img_vis_hits = postfilter_hits_by_type(img_vis_hits, inferred)
-    if not img_sem_hits or (img_sem_hits and OBJECT_TYPE_FIELD not in img_sem_hits[0]):
-        img_sem_hits = postfilter_hits_by_type(img_sem_hits, inferred)
+            # If OBJECT_TYPE is missing from index, post-filter by keywords
+            if inferred:
+                if not img_vis_hits or (img_vis_hits and OBJECT_TYPE_FIELD not in img_vis_hits[0]):
+                    img_vis_hits = postfilter_hits_by_type(img_vis_hits, inferred)
+                if not img_sem_hits or (img_sem_hits and OBJECT_TYPE_FIELD not in img_sem_hits[0]):
+                    img_sem_hits = postfilter_hits_by_type(img_sem_hits, inferred)
 
-# Fuse the two lists with adjustable visual weight
-fused_img = fuse_hits(img_vis_hits, img_sem_hits, alpha=visual_weight)
+            # Fuse the two lists with adjustable visual weight
+            fused_img = fuse_hits(img_vis_hits, img_sem_hits, alpha=visual_weight)
 
-# Optional: if the user also typed text, do a text search (same filter) and fuse again
-if search_query.strip():
-    txt_res = marqo_search(search_query.strip(), limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
-    txt_hits = txt_res.get("hits", []) if txt_res else []
-    if inferred and (not txt_hits or (txt_hits and OBJECT_TYPE_FIELD not in txt_hits[0])):
-        txt_hits = postfilter_hits_by_type(txt_hits, inferred)
-    gamma = text_weight if text_weight is not None else 0.35
-    results_payload = {"hits": fuse_hits(fused_img, txt_hits, alpha=1.0 - gamma)}
-else:
-    results_payload = {"hits": fused_img}
+            # Optional: if the user also typed text, do a text search (same filter) and fuse again
+            if search_query.strip():
+                txt_res = marqo_search(search_query.strip(), limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
+                txt_hits = txt_res.get("hits", []) if txt_res else []
+                if inferred and (not txt_hits or (txt_hits and OBJECT_TYPE_FIELD not in txt_hits[0])):
+                    txt_hits = postfilter_hits_by_type(txt_hits, inferred)
+                gamma = text_weight if text_weight is not None else 0.35
+                results_payload = {"hits": fuse_hits(fused_img, txt_hits, alpha=1.0 - gamma)}
+            else:
+                results_payload = {"hits": fused_img}
 
 elif search_query.strip():
     with st.spinner("Ieškoma pagal tekstą..."):

@@ -13,13 +13,12 @@ from sklearn.cluster import KMeans
 import boto3
 
 # =============================================================
-# Streamlit App: Visual Search with "same-type" gating (Marqo + R2)
+# Streamlit App
 # =============================================================
 
 # -----------------------------
 # Config (from secrets or ENV)
 # -----------------------------
-
 def _cfg(key: str, default: Optional[str] = None) -> Optional[str]:
     try:
         return st.secrets[key]
@@ -28,7 +27,6 @@ def _cfg(key: str, default: Optional[str] = None) -> Optional[str]:
 
 MARQO_URL: str = (_cfg("MARQO_URL", "https://marqo.logicafutura.com") or "").rstrip("/")
 INDEX_NAME: str = _cfg("INDEX_NAME", "furniture-index") or "furniture-index"
-
 TITLE_FIELD: str = _cfg("TITLE_FIELD", "name") or "name"
 IMAGE_FIELD: str = _cfg("IMAGE_FIELD", "image") or "image"
 ALT_IMAGE_FIELD: str = _cfg("ALT_IMAGE_FIELD", "image_url") or "image_url"
@@ -37,32 +35,26 @@ DOM_COLOR_FIELD: str = _cfg("DOMINANT_COLOR_FIELD", "dominant_color") or "domina
 SKU_FIELD: str = _cfg("SKU_FIELD", "product_id") or "product_id"
 CLICK_URL_FIELD: str = _cfg("CLICK_URL_FIELD", "product_url") or "product_url"
 
-# Cloudflare Access headers (if your Marqo is behind Cloudflare Access)
+# Cloudflare Access headers
 CF_ACCESS_CLIENT_ID = _cfg("CF_ACCESS_CLIENT_ID")
 CF_ACCESS_CLIENT_SECRET = _cfg("CF_ACCESS_CLIENT_SECRET")
+HEADERS: Dict[str, str] = {"Content-Type": "application/json"}
+if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+    HEADERS["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
+    HEADERS["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
 
-# R2 (for uploading the query image and making it web-accessible to Marqo)
+# R2 Config
 R2_ENDPOINT_URL: str = _cfg("R2_ENDPOINT_URL") or ""
 R2_ACCESS_KEY_ID: Optional[str] = _cfg("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY: Optional[str] = _cfg("R2_SECRET_ACCESS_KEY")
 R2_BUCKET: str = _cfg("R2_BUCKET", "streamlit098") or "streamlit098"
 PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "") or ""
 
-HEADERS: Dict[str, str] = {"Content-Type": "application/json"}
-if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
-    HEADERS["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
-    HEADERS["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
-
-# Tensor fields available in the current index (keep in sync with your indexer)
-KNOWN_TENSOR_FIELDS = {"name", "description", "image", "spec_text", "search_blob"}
-
-
 # =============================================================
 # Helper Functions
 # =============================================================
 
 def to_hex(rgb) -> str:
-    """Converts an RGB tuple or list to a hex string."""
     r, g, b = [int(max(0, min(255, v))) for v in rgb]
     return f"#{r:02x}{g:02x}{b:02x}"
 
@@ -82,11 +74,11 @@ def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
     except Exception:
         return None
 
-def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None, method: str = "TENSOR") -> Optional[Dict[str, Any]]:
-    """Performs a search on Marqo, allowing method to be 'TENSOR' or 'LEXICAL'."""
+def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    # This function now only performs TENSOR searches
     payload: Dict[str, Any] = {
-        "limit": limit, "q": q, "searchMethod": method,
-        "searchableAttributes": attrs or [IMAGE_FIELD, TITLE_FIELD, SEARCH_BLOB_FIELD],
+        "limit": limit, "q": q, "searchMethod": "TENSOR",
+        "searchableAttributes": attrs,
         "attributesToRetrieve": ["_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD, SKU_FIELD, CLICK_URL_FIELD, "_score"]
     }
     if filter_string: payload["filter"] = filter_string
@@ -99,21 +91,6 @@ def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, 
         st.error(f"API search error: {e.response.text if e.response else e}")
         return None
 
-def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], alpha: float = 0.7) -> List[Dict[str, Any]]:
-    def to_map(hits):
-        return {h.get('_id'): float(h.get('_score', 0.0)) for h in hits}
-    imap, tmap = to_map(img_hits), to_map(txt_hits)
-    ids = set(imap) | set(tmap)
-    fused = []
-    for _id in ids:
-        s = alpha * imap.get(_id, 0.0) + (1 - alpha) * tmap.get(_id, 0.0)
-        base = next((h for h in img_hits if h.get('_id') == _id), None) or next((h for h in txt_hits if h.get('_id') == _id), None)
-        if not base: continue
-        h = dict(base); h['_fused_score'] = s
-        fused.append(h)
-    fused.sort(key=lambda x: x.get('_fused_score', 0.0), reverse=True)
-    return fused
-
 def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
     if not PUBLIC_BASE_URL: raise RuntimeError("PUBLIC_BASE_URL is not configured.")
     r2 = boto3.client("s3", endpoint_url=R2_ENDPOINT_URL, aws_access_key_id=R2_ACCESS_KEY_ID, aws_secret_access_key=R2_SECRET_ACCESS_KEY)
@@ -124,7 +101,6 @@ def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
     return f"{PUBLIC_BASE_URL.rstrip('/')}/{key}"
 
 def render_pagination(total_pages: int, current_page_zerobased: int):
-    """Renders the advanced pagination component."""
     if total_pages <= 1: return
     max_pages_to_show = 10
     nav = st.container()
@@ -182,12 +158,10 @@ if uploaded_file:
             b_min, b_max = max(0, b - color_threshold), min(255, b + color_threshold)
             color_filter_string = f"(color_r:[{r_min} TO {r_max}] AND color_g:[{g_min} TO {g_max}] AND color_b:[{b_min} TO {b_max}])"
             hex_color = to_hex(query_rgb)
-            st.sidebar.markdown(f"""
-                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-family: 'Source Sans Pro', sans-serif; color: #262730;">
+            st.sidebar.markdown(f"""<div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-family: 'Source Sans Pro', sans-serif; color: #262730;">
                     <span style="font-size: 0.9rem;">Filtering by dominant color:</span>
                     <div style="width: 25px; height: 25px; background-color: {hex_color}; border: 1px solid #ccc; border-radius: 4px;"></div>
-                </div>
-                """, unsafe_allow_html=True)
+                </div>""", unsafe_allow_html=True)
 
     with st.spinner("Searching..."):
         try:
@@ -196,16 +170,18 @@ if uploaded_file:
             st.error(f"Failed to upload image: {e}"); st.stop()
         
         vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD], filter_string=color_filter_string)
-        sem_res = marqo_search(query_url, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=color_filter_string)
+        sem_res = marqo_search(query_url, attrs=[SEARCH_BLOB_FIELD], filter_string=color_filter_string)
         
-        # --- FIX: Safely get hits, providing an empty list if the search failed ---
         vis_hits = vis_res.get("hits", []) if vis_res else []
         sem_hits = sem_res.get("hits", []) if sem_res else []
         image_search_results = fuse_hits(vis_hits, sem_hits)
 
         if search_query.strip():
-            txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD], method="LEXICAL")
-            # Safely get hits from the text search
+            search_words = search_query.strip().split()
+            text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
+            text_filter_string = f"({' AND '.join(text_filters)})"
+
+            txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD], filter_string=text_filter_string)
             text_search_hits = txt_res.get("hits", []) if txt_res else []
             
             image_result_ids = {hit['_id'] for hit in image_search_results}
@@ -218,8 +194,17 @@ if uploaded_file:
 # --- Main Logic Branch: Text-Only Search ---
 elif search_query.strip():
     with st.spinner("Searching by text..."):
-        txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD], method="LEXICAL")
-        # Safely get hits from the text search
+        search_words = search_query.strip().split()
+        text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
+        final_filter_string = f"({' AND '.join(text_filters)})"
+        
+        # --- MODIFICATION: Search semantically on the name field AND filter on it ---
+        txt_res = marqo_search(
+            q=search_query.strip(),
+            limit=1000,
+            attrs=[TITLE_FIELD], # Focus semantic search on the name
+            filter_string=final_filter_string # Enforce keyword presence
+        )
         final_hits = txt_res.get("hits", []) if txt_res else []
 
 # --- Initial State ---

@@ -412,7 +412,16 @@ if uploaded_file:
                 if inferred:
                     img_vis_hits = postfilter_hits_by_type(img_vis_hits, inferred)
                     img_sem_hits = postfilter_hits_by_type(img_sem_hits, inferred)
-            # If OBJECT_TYPE is missing from index, post-filter by keywords
+            
+            # If OBJECT_TYPE is missing from index, post-filter by keywords but don't over-filter
+            if inferred:
+                def safe_postfilter(lst):
+                    fl = postfilter_hits_by_type(lst, inferred)
+                    return fl if fl else lst  # keep originals if filtering removes everything
+                if not img_vis_hits or (img_vis_hits and OBJECT_TYPE_FIELD not in img_vis_hits[0]):
+                    img_vis_hits = safe_postfilter(img_vis_hits)
+                if not img_sem_hits or (img_sem_hits and OBJECT_TYPE_FIELD not in img_sem_hits[0]):
+                    img_sem_hits = safe_postfilter(img_sem_hits)
             if inferred:
                 if not img_vis_hits or (img_vis_hits and OBJECT_TYPE_FIELD not in img_vis_hits[0]):
                     img_vis_hits = postfilter_hits_by_type(img_vis_hits, inferred)
@@ -464,6 +473,7 @@ if results_payload and results_payload.get("hits"):
     # Optional color filter (applies mainly to image queries)
     if uploaded_file and use_color_filter and st.session_state.query_color is not None:
         qcol = st.session_state.query_color
+        original_hits = list(hits)
         filtered = []
         for h in hits:
             hcol_hex = h.get(DOM_COLOR_FIELD, "#000000")
@@ -472,7 +482,11 @@ if results_payload and results_payload.get("hits"):
             if dist <= color_threshold + 5:
                 h['_adj_score'] = h.get('_fused_score', h.get('_score', 0.0)) - (dist / 441.0)
                 filtered.append(h)
-        hits = filtered
+        if filtered:
+            hits = filtered
+        else:
+            st.info("Spalvos filtras pašalino visus rezultatus — rodau be spalvų filtro.")
+            hits = original_hits
 
     # Final sort by fused/score
     hits.sort(key=lambda h: h.get('_adj_score', h.get('_fused_score', h.get('_score', 0.0))), reverse=True)

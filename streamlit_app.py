@@ -440,6 +440,16 @@ uploaded_file = st.sidebar.file_uploader(
         "Leidžiami formatai: JPG, JPEG, PNG, WEBP."
     ),
 )
+# Išvalyti teksto paieškos lauką kiekvieno naujo paveikslėlio įkėlimo metu (prieš kuriant valdiklį)
+if uploaded_file:
+    try:
+        _hash_for_text = hash(uploaded_file.getvalue())
+        if st.session_state.get('last_upload_hash_textclear') != _hash_for_text:
+            st.session_state['last_upload_hash_textclear'] = _hash_for_text
+            st.session_state['search_text'] = ""
+    except Exception:
+        pass
+
 search_query = st.sidebar.text_input(
     "🔍 Ieškoti pagal tekstą",
     help=(
@@ -447,6 +457,7 @@ search_query = st.sidebar.text_input(
         "Paieška vertina visos frazės prasmę (semantiškai), todėl ‘raudona sofa’ ieškos būtent raudonų sofų. "
         "Jei įkelta nuotrauka, tekstas susiaurina vizualiai rastus rezultatus; jei nuotraukos nėra – ieško tik pagal tekstą."
     ),
+key="search_text",
 )
 
 # Tekstinės paieškos atveju rodyti spalvų parinkiklį

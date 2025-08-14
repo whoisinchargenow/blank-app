@@ -228,84 +228,8 @@ def color_distance(c1: np.ndarray, c2: np.ndarray) -> float:
     return float(np.linalg.norm(c1 - c2))
 
 # =============================================================
-# Type inference & gating helpers
-# =============================================================
-
-def normalize_text(s: str) -> str:
-    return (s or "").strip().lower()
-
-
-def infer_type_from_text(text: str) -> Optional[str]:
-    t = normalize_text(text)
-    best_type, best_hits = None, 0
-    for tname, kws in TYPE_KEYWORDS.items():
-        hits = sum(1 for kw in kws if kw in t)
-        if hits > best_hits:
-            best_type, best_hits = tname, hits
-    return best_type
-
-
-def canonicalize_type(t: Optional[str]) -> Optional[str]:
-    if not t:
-        return None
-    t_low = t.strip().lower()
-    if t_low in TYPE_KEYWORDS.keys():
-        return t_low
-    for canon, kws in TYPE_KEYWORDS.items():
-        if t_low in (kw.lower() for kw in kws):
-            return canon
-    return None
-
-
-def infer_type_from_hit(hit: Dict[str, Any]) -> Optional[str]:
-
-    # Prefer explicit field if present
-    val = hit.get(OBJECT_TYPE_FIELD)
-    if isinstance(val, str) and val:
-        return canonicalize_type(val)
-    # Otherwise infer from title/description/spec
-    title = hit.get(TITLE_FIELD, hit.get("title", ""))
-    desc = hit.get(DESCRIPTION_FIELD, "")
-    spec = hit.get(SPEC_TEXT_FIELD, "")
-    for candidate in (title, desc, spec):
-        t = infer_type_from_text(candidate)
-        if t:
-            return t
-    return None
-
-
-def infer_type_from_hits(hits: List[Dict[str, Any]], top_k: int = 20) -> Optional[str]:
-    votes: Dict[str, float] = {}
-    for h in hits[:top_k]:
-        t = infer_type_from_hit(h)
-        if not t:
-            continue
-        # score-weighted voting
-        score = float(h.get('_score', 1.0))
-        votes[t] = votes.get(t, 0.0) + max(0.5, score)
-    if not votes:
-        return None
-    # return the type with the highest cumulative score
-    return max(votes.items(), key=lambda kv: kv[1])[0]
-
-
-def postfilter_hits_by_type(hits: List[Dict[str, Any]], target_type: str) -> List[Dict[str, Any]]:
-    """If OBJECT_TYPE_FIELD is missing, filter by keywords in title/description/spec."""
-    filtered = []
-    kws = TYPE_KEYWORDS.get(target_type, [target_type])
-    kws = [k.lower() for k in kws]
-    for h in hits:
-        blob = " ".join([
-            normalize_text(h.get(TITLE_FIELD, h.get("title", ""))),
-            normalize_text(h.get(DESCRIPTION_FIELD, "")),
-            normalize_text(h.get(SPEC_TEXT_FIELD, "")),
-        ])
-        if any(kw in blob for kw in kws):
-            filtered.append(h)
-    return filtered
-
-# =============================================================
 # Marqo search (HTTP API)
+# =============================================================
 # =============================================================
 
 def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
@@ -328,7 +252,7 @@ def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, 
         "searchableAttributes": searchable_attributes,
         "attributesToRetrieve": [
             "_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD,
-            SKU_FIELD, OBJECT_TYPE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD,
+            SKU_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD,
             SEARCH_BLOB_FIELD, CLICK_URL_FIELD
         ]
     }
@@ -374,12 +298,12 @@ def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], al
 
 st.set_page_config(page_title="Baldų paieška", layout="wide")
 st.title("🛋️ Baldų ir interjero elementų paieška")
-st.caption("Įkelkite produkto nuotrauką arba įveskite raktažodžius. Sistema ieškos tik tarp to paties tipo objektų (pvz., įkėlę lempos nuotrauką – ieškos lempų).")
+st.caption("Sistema pirmiausia ieško vizualiai panašių produktų. Tekstas – papildomas signalas.").")
 
 # Session state
 for key, default in (
-    ('last_upload_hash', None), ('search_results', None), ('query_color', None), ('base_hits', None), ('last_color_threshold', None), ('last_selected_type', None),
-    ('page', 0), ('detected_object_type', None), ('selected_object_type', None),
+    ('last_upload_hash', None), ('search_results', None), ('query_color', None), ('base_hits', None), ('last_color_threshold', None),
+    ('page', 0),
 ):
     if key not in st.session_state:
         st.session_state[key] = default
@@ -399,100 +323,8 @@ use_color_filter = st.sidebar.checkbox("Įjungti spalvos filtravimą", value=Tru
 visual_weight = 0.75  # fixed visual weight (removed UI slider)
 text_weight = None
 if search_query.strip():
-    text_weight = st.sidebar.slider(
-        "🔤 Teksto svoris (β)", 0.0, 1.0, 0.35, 0.05,
-        help="Kiek pridėti vartotojo teksto paiešką prie rezultato (sujungiama su vaizdo paieška)."
-    )
-
-# Product type manual selector
-_type_choices = ['(automatiškai)'] + sorted(TYPE_KEYWORDS.keys())
-_current_sel = st.session_state.get('selected_object_type')
-try:
-    _default_idx = _type_choices.index(_current_sel) if _current_sel in _type_choices else 0
-except Exception:
-    _default_idx = 0
-_selected_label = st.sidebar.selectbox("Produkto tipas (pasirinktinai)", options=_type_choices, index=_default_idx)
-_manual_type = None if _selected_label == '(automatiškai)' else _selected_label
-st.session_state.selected_object_type = _manual_type
-
-# -----------------------------
-# Main logic
-# -----------------------------
-
-results_payload: Optional[Dict[str, Any]] = None
-
-if uploaded_file:
-    st.sidebar.image(uploaded_file, caption="Įkeltas paveikslėlis", width=180)
-    img_bytes = uploaded_file.getvalue()
-    current_hash = hash(img_bytes)
-
-    recompute_needed = (current_hash != st.session_state.last_upload_hash) or (st.session_state.get('last_selected_type') != st.session_state.get('selected_object_type'))
-    if recompute_needed:
-        st.session_state.last_upload_hash = current_hash
-        st.session_state.page = 0
-        st.session_state.last_selected_type = st.session_state.get('selected_object_type')
-
-        # Upload query image to R2 for a stable, public URL
-        try:
-            query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
-        except Exception as e:
-            st.error(f"Nepavyko įkelti į R2: {e}")
-            st.stop()
-
-        # Dominant color (for optional refinement)
-        st.session_state.query_color = get_dominant_color(img_bytes)
-
-        with st.spinner("Analizuojamas paveikslėlis ir nustatomas tipas..."):
-            # Step 1: broad image search (no filter) to infer type from TOP-K
-            probe = marqo_search(query_url, limit=200)
-            hits = probe.get("hits", []) if probe else []
-            inferred_raw = infer_type_from_hits(hits, top_k=30) or ""
-            inferred = canonicalize_type(inferred_raw) or ""
-            st.session_state.detected_object_type = inferred
-            # Only set selected type if it is a valid canonical option
-            if inferred in TYPE_KEYWORDS.keys() and (st.session_state.get('selected_object_type') in (None, "")):
-                st.session_state.selected_object_type = inferred
-
-            # Build a filter if the index stores OBJECT_TYPE_FIELD
-            effective_type = st.session_state.get('selected_object_type') or inferred
-            filter_query = None
-            if effective_type:
-                filter_query = f'{OBJECT_TYPE_FIELD}:"{effective_type}"'
-
-            # Step 2: run two searches for controllable boosting: visual-only and semantic (text fields)
-            def run_dual_search(q_url: str, flt: Optional[str]):
-                a = marqo_search(q_url, limit=200, filter_string=flt, attrs=VISUAL_ATTRS)
-                b = marqo_search(q_url, limit=200, filter_string=flt, attrs=TEXT_ATTRS)
-                return (a.get("hits", []) if a else [], b.get("hits", []) if b else [])
-
-            img_vis_hits, img_sem_hits = run_dual_search(query_url, filter_query)
-
-            # Fallback: if filtered search produced no hits, retry WITHOUT filter and post-filter
-            if not img_vis_hits and not img_sem_hits:
-                img_vis_hits, img_sem_hits = run_dual_search(query_url, None)
-                if inferred:
-                    img_vis_hits = postfilter_hits_by_type(img_vis_hits, inferred)
-                    img_sem_hits = postfilter_hits_by_type(img_sem_hits, inferred)
-            
-            # If OBJECT_TYPE is missing from index, post-filter by keywords but don't over-filter
-            if effective_type:
-                def safe_postfilter(lst):
-                    fl = postfilter_hits_by_type(lst, effective_type)
-                    return fl if fl else lst  # keep originals if filtering removes everything
-                if not img_vis_hits or (img_vis_hits and OBJECT_TYPE_FIELD not in img_vis_hits[0]):
-                    img_vis_hits = safe_postfilter(img_vis_hits)
-                if not img_sem_hits or (img_sem_hits and OBJECT_TYPE_FIELD not in img_sem_hits[0]):
-                    img_sem_hits = safe_postfilter(img_sem_hits)
-
-            # Fuse the two lists with adjustable visual weight
-            fused_img = fuse_hits(img_vis_hits, img_sem_hits, alpha=visual_weight)
-
-            # Optional: if the user also typed text, do a text search (same filter) and fuse again
-            if search_query.strip():
-                txt_res = marqo_search(search_query.strip(), limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
+                txt_res = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
                 txt_hits = txt_res.get("hits", []) if txt_res else []
-                if inferred and (not txt_hits or (txt_hits and OBJECT_TYPE_FIELD not in txt_hits[0])):
-                    txt_hits = postfilter_hits_by_type(txt_hits, inferred)
                 gamma = text_weight if text_weight is not None else 0.35
                 final_hits = fuse_hits(fused_img, txt_hits, alpha=1.0 - gamma)
                 st.session_state.base_hits = final_hits
@@ -503,20 +335,8 @@ if uploaded_file:
 
 elif search_query.strip():
     with st.spinner("Ieškoma pagal tekstą..."):
-        # Text-only search (no image). Use manual type from sidebar if present.
-        manual_t_raw = st.session_state.selected_object_type
-        manual_t = canonicalize_type(manual_t_raw)
-        filter_query = f'{OBJECT_TYPE_FIELD}:"{manual_t}"' if manual_t else None
-
-        txt = marqo_search(search_query.strip(), limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
+        txt = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
         hits = txt.get("hits", []) if txt else []
-
-        # If filtered search empty, retry without filter and post-filter by manual type
-        if (not hits) and manual_t:
-            txt = marqo_search(search_query.strip(), limit=200, filter_string=None, attrs=TEXT_ATTRS)
-            hits = txt.get("hits", []) if txt else []
-            hits = postfilter_hits_by_type(hits, manual_t)
-
         st.session_state.base_hits = hits
         results_payload = {"hits": hits}
 else:
@@ -535,19 +355,38 @@ if base_list:
     if uploaded_file and use_color_filter and st.session_state.query_color is not None:
         qcol = st.session_state.query_color
         original_hits = list(hits)
-        filtered = []
+        matches, unknowns = [], []
+
+        def _is_valid_hex(hx: str) -> bool:
+            if not isinstance(hx, str):
+                return False
+            s = hx.lstrip('#')
+            return len(s) == 6 and all(c in '0123456789abcdefABCDEF' for c in s)
+
         for h in hits:
-            hcol_hex = h.get(DOM_COLOR_FIELD, "#000000")
-            h_rgb = hex_to_rgb(hcol_hex)
+            hx = h.get(DOM_COLOR_FIELD)
+            if not _is_valid_hex(hx):
+                unknowns.append(h)  # no color in index → don't over-filter
+                continue
+            h_rgb = hex_to_rgb(hx)
             dist = color_distance(qcol, h_rgb)
             if dist <= color_threshold + 5:
                 h['_adj_score'] = h.get('_fused_score', h.get('_score', 0.0)) - (dist / 441.0)
-                filtered.append(h)
-        if filtered:
-            hits = filtered
+                matches.append(h)
+
+        if matches:
+            hits = matches
+            # keep unknowns only if there are very few matches
+            if len(matches) < 5:
+                hits.extend(unknowns)
         else:
-            st.info("Spalvos filtras pašalino visus rezultatus — rodau be spalvų filtro.")
-            hits = original_hits
+            # No color matches; if we have unknowns, show them instead of empty
+            if unknowns:
+                st.info("Dauguma įrašų neturi spalvos indekse — rodau be spalvų filtro.")
+                hits = original_hits  # fall back to unfiltered
+            else:
+                st.info("Spalvos filtras pašalino visus rezultatus — rodau be spalvų filtro.")
+                hits = original_hits
 
     # Final sort by fused/score
     hits.sort(key=lambda h: h.get('_adj_score', h.get('_fused_score', h.get('_score', 0.0))), reverse=True)
@@ -559,40 +398,10 @@ if base_list:
 
     st.subheader(f"Rasta rezultatų: {len(hits)}")
 
-    # Show detected/selected type
-    if st.session_state.selected_object_type:
-        st.info(f"🔒 Paieška apribota tipui: **{st.session_state.selected_object_type}**")
-
-    col_prev, col_pg, col_next = st.columns([2, 8, 2])
-    with col_prev:
-        if st.button("⬅ Ankstesnis", disabled=(current_page == 0)):
-            st.session_state.page -= 1
-            st.rerun()
-    with col_pg:
-        st.markdown(f"<div style='text-align:center;'>Puslapis {current_page + 1} iš {total_pages}</div>", unsafe_allow_html=True)
-    with col_next:
-        if st.button("Kitas ➡", disabled=(current_page >= total_pages - 1)):
-            st.session_state.page += 1
-            st.rerun()
-
-    start = current_page * page_size
-    end = start + page_size
-    page_hits = hits[start:end]
-
-    cols = st.columns(3)
-    for i, h in enumerate(page_hits):
-        with cols[i % 3]:
-            img_url = h.get(IMAGE_FIELD) or h.get(ALT_IMAGE_FIELD) or h.get("image")
-            title = h.get(TITLE_FIELD, h.get('title', 'Be pavadinimo'))
-            _id = h.get('_id', 'Nėra')
-            obj_t = h.get(OBJECT_TYPE_FIELD) or infer_type_from_hit(h) or "—"
-            score = h.get('_fused_score', h.get('_score', None))
-            click_url = h.get(CLICK_URL_FIELD)
-
-            if img_url:
+                if img_url:
                 st.image(img_url, use_container_width=True)
             st.write(f"**{title}**")
-            st.caption(f"ID: {_id} · Tipas: {obj_t}")
+            st.caption(f"ID: {_id}")
             if isinstance(score, (int, float)):
                 st.caption(f"Panašumas: {score:.3f}")
             if isinstance(click_url, str) and click_url:

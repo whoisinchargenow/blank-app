@@ -199,75 +199,113 @@ def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
 # =============================================================
 
 def get_dominant_color(image_bytes: bytes) -> np.ndarray:
-    """Return approximate dominant color of the *object*, not the background.
-    Heuristics:
-      - center-weighted sampling (object is usually centered)
-      - drop very low-saturation (gray/white) and extreme value pixels
-      - KMeans on the remaining pixels (k=3) and pick the most salient cluster
-    Returns RGB as ints [0..255].
+    """Estimate the dominant *object* colour with robust fallbacks.
+    Strategy:
+      1) Center-weight + saturation/value mask → KMeans over top-weighted pixels.
+      2) Relax thresholds if no samples.
+      3) Edge-weight mask (gradient on V channel) if still no samples.
+      4) Palette quantization fallback (PIL adaptive palette).
+      5) Final fallback: global mean RGB.
+    Always returns an RGB np.ndarray[int] shape (3,).
     """
     try:
-        # Load & resize for speed/consistency
-        img = Image.open(io.BytesIO(image_bytes)).convert('RGB').resize((160, 160))
-        rgb = np.asarray(img, dtype=np.float32) / 255.0  # (H,W,3)
-        # HSV for saturation/value masks
-        hsv = np.asarray(img.convert('HSV'), dtype=np.float32)
-        h, s, v = hsv[..., 0] / 255.0, hsv[..., 1] / 255.0, hsv[..., 2] / 255.0
-
-        H, W = s.shape
-        yy, xx = np.mgrid[0:H, 0:W]
-        cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
-        # Gaussian center mask (sigma ~ 0.45 of half-diagonal)
-        rx = (xx - cx) / (0.45 * W)
-        ry = (yy - cy) / (0.45 * H)
-        center_w = np.exp(-(rx * rx + ry * ry))
-
-        # Keep reasonably saturated, not too bright/dark pixels
-        mask = (s >= 0.22) & (v >= 0.10) & (v <= 0.95)
-        # Weight by center & saturation to emphasize object areas
-        weights = center_w * (0.3 + 0.7 * s)
-        weights = np.where(mask, weights, 0.0)
-
-        # Select top-weighted pixels (avoid bias by taking the top 25%)
-        flat_w = weights.reshape(-1)
-        if flat_w.max() <= 0:
-            raise ValueError("no salient pixels")
-        thresh = np.quantile(flat_w[flat_w > 0], 0.75)
-        pick = flat_w >= max(thresh, 1e-6)
-        samples = rgb.reshape(-1, 3)[pick]
-        if samples.shape[0] < 300:
-            # fallback: relax threshold
-            pick = flat_w > 0
-            samples = rgb.reshape(-1, 3)[pick]
-        if samples.shape[0] == 0:
-            raise ValueError("no samples")
-
-        # KMeans over selected pixels
-        km = KMeans(n_clusters=3, n_init=10, random_state=0)
-        km.fit(samples)
-        labels = km.labels_
-        centers = km.cluster_centers_
-
-        # Score clusters: size * (mean saturation + epsilon)
-        scores = []
-        for k in range(centers.shape[0]):
-            idx = (labels == k)
-            if not np.any(idx):
-                scores.append(-1)
-                continue
-            mean_rgb = samples[idx].mean(axis=0)
-            # recompute saturation on cluster mean
-            r, g, b = mean_rgb
-            # approximate saturation from RGB
-            mx, mn = float(np.max(mean_rgb)), float(np.min(mean_rgb))
-            sat = 0.0 if mx == 0 else (mx - mn) / mx
-            scores.append(idx.mean() * (sat + 0.05))
-        best = int(np.argmax(scores))
-        color = np.clip((centers[best] * 255.0).round().astype(int), 0, 255)
-        return color
-    except Exception as e:
-        st.warning(f"Nepavyko nustatyti objekto spalvos: {e}")
+        img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    except Exception:
         return np.array([0, 0, 0])
+
+    img = img.resize((160, 160))
+    rgb = np.asarray(img, dtype=np.float32) / 255.0  # (H,W,3)
+    hsv = np.asarray(img.convert('HSV'), dtype=np.float32) / 255.0
+    s = hsv[..., 1]
+    v = hsv[..., 2]
+
+    H, W = s.shape
+    yy, xx = np.mgrid[0:H, 0:W]
+    cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
+    center_w = np.exp(-(((xx - cx) / (0.45 * W)) ** 2 + ((yy - cy) / (0.45 * H)) ** 2))
+
+    def _kmeans_pick(samples: np.ndarray) -> Optional[np.ndarray]:
+        if samples is None or samples.size == 0:
+            return None
+        k = 3 if samples.shape[0] >= 600 else 2
+        try:
+            km = KMeans(n_clusters=k, n_init=10, random_state=0)
+            km.fit(samples)
+            labels = km.labels_
+            centers = km.cluster_centers_
+            # score by cluster size * saturation
+            scores = []
+            for ki in range(centers.shape[0]):
+                idx = (labels == ki)
+                if not np.any(idx):
+                    scores.append(-1)
+                    continue
+                mean_rgb = samples[idx].mean(axis=0)
+                mx, mn = float(np.max(mean_rgb)), float(np.min(mean_rgb))
+                sat = 0.0 if mx <= 1e-6 else (mx - mn) / mx
+                scores.append(idx.mean() * (sat + 0.05))
+            best = int(np.argmax(scores))
+            c = np.clip((centers[best] * 255.0).round().astype(int), 0, 255)
+            return c
+        except Exception:
+            return None
+
+    flat_rgb = rgb.reshape(-1, 3)
+
+    # Pass 1: strict mask
+    weights = center_w * (0.3 + 0.7 * s)
+    mask = (s >= 0.22) & (v >= 0.10) & (v <= 0.95)
+    w_flat = (weights * mask).reshape(-1)
+    if np.any(w_flat > 0):
+        thr = np.quantile(w_flat[w_flat > 0], 0.75)
+        sel = flat_rgb[w_flat >= max(thr, 1e-6)]
+        col = _kmeans_pick(sel)
+        if col is not None:
+            return col
+
+    # Pass 2: relaxed mask
+    mask2 = (s >= 0.05) & (v >= 0.08) & (v <= 0.98)
+    w_flat2 = (center_w * (0.2 + 0.8 * s) * mask2).reshape(-1)
+    if np.any(w_flat2 > 0):
+        thr2 = np.quantile(w_flat2[w_flat2 > 0], 0.6)
+        sel2 = flat_rgb[w_flat2 >= max(thr2, 1e-6)]
+        col = _kmeans_pick(sel2)
+        if col is not None:
+            return col
+
+    # Pass 3: edge mask on V channel
+    gx = np.zeros_like(v)
+    gy = np.zeros_like(v)
+    gx[:, 1:-1] = np.abs(v[:, 2:] - v[:, :-2])
+    gy[1:-1, :] = np.abs(v[2:, :] - v[:-2, :])
+    edge = gx + gy
+    if float(edge.max()) > 0:
+        e = edge / (edge.max() + 1e-6)
+        sel3 = flat_rgb[(e >= np.quantile(e, 0.6)).reshape(-1)]
+        col = _kmeans_pick(sel3)
+        if col is not None:
+            return col
+
+    # Pass 4: palette quantization
+    try:
+        pal = img.convert('P', palette=Image.ADAPTIVE, colors=6)
+        palette = pal.getpalette()
+        counts = pal.getcolors()
+        if counts:
+            counts.sort(reverse=True)
+            for cnt, idx in counts:
+                r, g, b = palette[idx*3: idx*3+3]
+                # skip near white/black
+                if not ((r > 245 and g > 245 and b > 245) or (r < 10 and g < 10 and b < 10)):
+                    return np.array([int(r), int(g), int(b)])
+            r, g, b = palette[counts[0][1]*3: counts[0][1]*3+3]
+            return np.array([int(r), int(g), int(b)])
+    except Exception:
+        pass
+
+    # Pass 5: global mean
+    mean = (rgb.mean(axis=(0, 1)) * 255.0).round().astype(int)
+    return np.array([int(mean[0]), int(mean[1]), int(mean[2])])
 
 
 def hex_to_rgb(hex_color: str) -> np.ndarray:

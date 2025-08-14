@@ -3,7 +3,7 @@ import io
 import json
 import uuid
 import mimetypes
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import requests
 import streamlit as st
@@ -12,56 +12,94 @@ import numpy as np
 from sklearn.cluster import KMeans
 import boto3
 
-# Streamlit App for Visual Search using Marqo, Cloudflare R2, and Cloudflare Access.
+# =============================================================
+# Streamlit App: Visual Search with "same-type" gating (Marqo + R2)
+# =============================================================
+# Key upgrades vs your version:
+# 1) Robust object-type inference from TOP-K image hits using rich keyword map
+# 2) Hard filter by OBJECT_TYPE field when present in the index; otherwise
+#    post-filter by inferred type (title/description/spec_text keywords)
+# 3) Optional fusion of image and text queries (image + user text) with
+#    weighted score merge
+# 4) Searchable attributes expanded to include name/description/spec_text
+# 5) UI chip showing detected/selected type with manual override
+# =============================================================
 
 # -----------------------------
-# Konfigūracija (iš secrets arba ENV)
+# Config (from secrets or ENV)
 # -----------------------------
 
 def _cfg(key: str, default: Optional[str] = None) -> Optional[str]:
-    """Retrieves a configuration value from Streamlit secrets or environment variables."""
     try:
-        # Try to get from Streamlit secrets
         return st.secrets[key]  # type: ignore[attr-defined]
     except Exception:
-        # Fallback to environment variables
         return os.getenv(key, default)
 
 MARQO_URL: str = (_cfg("MARQO_URL", "https://marqo.logicafutura.com") or "").rstrip("/")
 INDEX_NAME: str = _cfg("INDEX_NAME", "furniture-index") or "furniture-index"
 
-TITLE_FIELD: str = _cfg("TITLE_FIELD", "title") or "title"
+TITLE_FIELD: str = _cfg("TITLE_FIELD", "name") or "name"
 IMAGE_FIELD: str = _cfg("IMAGE_FIELD", "image") or "image"
-ALT_IMAGE_FIELD: str = _cfg("ALT_IMAGE_FIELD", "image_vendor_url") or "image_vendor_url"
+ALT_IMAGE_FIELD: str = _cfg("ALT_IMAGE_FIELD", "image_url") or "image_url"
+DESCRIPTION_FIELD: str = _cfg("DESCRIPTION_FIELD", "description") or "description"
+SPEC_TEXT_FIELD: str = _cfg("SPEC_TEXT_FIELD", "spec_text") or "spec_text"
+SEARCH_BLOB_FIELD: str = _cfg("SEARCH_BLOB_FIELD", "search_blob") or "search_blob"
 DOM_COLOR_FIELD: str = _cfg("DOMINANT_COLOR_FIELD", "dominant_color") or "dominant_color"
-SKU_FIELD: str = _cfg("SKU_FIELD", "sku") or "sku"
+OBJECT_TYPE_FIELD: str = _cfg("OBJECT_TYPE_FIELD", "object_type") or "object_type"
+SKU_FIELD: str = _cfg("SKU_FIELD", "product_id") or "product_id"
+CLICK_URL_FIELD: str = _cfg("CLICK_URL_FIELD", "product_url") or "product_url"
 
-# Cloudflare Access Credentials
+# Cloudflare Access headers (if your Marqo is behind Cloudflare Access)
 CF_ACCESS_CLIENT_ID = _cfg("CF_ACCESS_CLIENT_ID")
 CF_ACCESS_CLIENT_SECRET = _cfg("CF_ACCESS_CLIENT_SECRET")
 
-# R2 Configuration
+# R2 (for uploading the query image and making it web-accessible to Marqo)
 R2_ENDPOINT_URL: str = _cfg("R2_ENDPOINT_URL") or ""
 R2_ACCESS_KEY_ID: Optional[str] = _cfg("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY: Optional[str] = _cfg("R2_SECRET_ACCESS_KEY")
 R2_BUCKET: str = _cfg("R2_BUCKET", "streamlit098") or "streamlit098"
-PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "https://pub-3ec323b4b4864664846453a4dda0930e.r2.dev") or ""
-
+PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "") or ""
 
 HEADERS: Dict[str, str] = {"Content-Type": "application/json"}
 if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
     HEADERS["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
     HEADERS["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
 
-KNOWN_TYPES = ['table', 'lamp', 'rack', 'chair', 'sofa', 'bench', 'bed', 'cabinet', 'desk']
+# Known, normalized object types we support for gating
+KNOWN_TYPES = [
+    "lamp", "light", "wall lamp", "floor lamp", "table lamp", "pendant", "chandelier", "sconce",
+    "table", "coffee table", "side table", "console table", "dining table",
+    "sofa", "couch", "loveseat", "sectional",
+    "chair", "armchair", "stool", "bench",
+    "rack", "shelf", "shelving",
+    "bed", "cabinet", "desk", "trolley", "mirror", "vase", "tray", "carpet", "rug"
+]
 
-# -----------------------------
-# R2 pagalbinės (įkėlimas)
-# -----------------------------
+# Rich keyword map to catch synonyms/variants for inference & filtering
+TYPE_KEYWORDS = {
+    "lamp": ["lamp", "light", "wall lamp", "floor lamp", "table lamp", "pendant", "chandelier", "sconce", "wall light"],
+    "table": ["table", "coffee table", "side table", "console table", "dining table"],
+    "sofa": ["sofa", "couch", "loveseat", "sectional"],
+    "chair": ["chair", "armchair", "stool"],
+    "bench": ["bench"],
+    "rack": ["rack", "shelf", "shelving"],
+    "bed": ["bed"],
+    "cabinet": ["cabinet"],
+    "desk": ["desk"],
+    "trolley": ["trolley", "bar cart"],
+    "mirror": ["mirror"],
+    "vase": ["vase"],
+    "tray": ["tray"],
+    "rug": ["rug", "carpet"]
+}
+
+# =============================================================
+# R2 helpers (upload the query image)
+# =============================================================
 
 def _r2_client():
     if not (R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and R2_ENDPOINT_URL):
-        raise RuntimeError("R2 prieigos raktai arba endpoint URL nenurodyti. Įdėkite R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY ir R2_ENDPOINT_URL į secrets.")
+        raise RuntimeError("R2 credentials or endpoint missing. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT_URL in secrets.")
     return boto3.client(
         "s3",
         endpoint_url=R2_ENDPOINT_URL,
@@ -71,25 +109,18 @@ def _r2_client():
 
 
 def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
-    """Uploads an image to R2 and returns its full public URL."""
     if not PUBLIC_BASE_URL:
-        raise RuntimeError("PUBLIC_BASE_URL is not configured in secrets.")
-        
+        raise RuntimeError("PUBLIC_BASE_URL is not configured.")
     ext = os.path.splitext(filename)[1].lower() or ".jpg"
-    # Create a unique key for the object in a 'queries' folder
     key = f"queries/{uuid.uuid4()}{ext}"
     content_type = mimetypes.guess_type(filename)[0] or "image/jpeg"
-    
     r2 = _r2_client()
     r2.put_object(Bucket=R2_BUCKET, Key=key, Body=img_bytes, ContentType=content_type)
-    
-    # Construct the full public URL
-    base = PUBLIC_BASE_URL.rstrip('/')
-    return f"{base}/{key}"
+    return f"{PUBLIC_BASE_URL.rstrip('/')}/{key}"
 
-# -----------------------------
-# Spalvos/objekto tipas pagalbinės
-# -----------------------------
+# =============================================================
+# Color helpers (optional color gating)
+# =============================================================
 
 def get_dominant_color(image_bytes: bytes) -> np.ndarray:
     try:
@@ -120,213 +151,320 @@ def hex_to_rgb(hex_color: str) -> np.ndarray:
 def color_distance(c1: np.ndarray, c2: np.ndarray) -> float:
     return float(np.linalg.norm(c1 - c2))
 
+# =============================================================
+# Type inference & gating helpers
+# =============================================================
 
-def detect_object_type(title: str) -> str:
-    t = (title or "").lower()
-    for obj in KNOWN_TYPES:
-        if obj in t:
-            return obj
-    return "other"
+def normalize_text(s: str) -> str:
+    return (s or "").strip().lower()
 
-# -----------------------------
-# Marqo paieška (su Access antraštėmis) - ACCURACY UPDATE
-# -----------------------------
 
-def marqo_search(query: str, filter_string: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def infer_type_from_text(text: str) -> Optional[str]:
+    t = normalize_text(text)
+    best_type, best_hits = None, 0
+    for tname, kws in TYPE_KEYWORDS.items():
+        hits = sum(1 for kw in kws if kw in t)
+        if hits > best_hits:
+            best_type, best_hits = tname, hits
+    return best_type
+
+
+def infer_type_from_hit(hit: Dict[str, Any]) -> Optional[str]:
+    # Prefer explicit field if present
+    val = hit.get(OBJECT_TYPE_FIELD)
+    if isinstance(val, str) and val:
+        return val.lower()
+    # Otherwise infer from title/description/spec
+    title = hit.get(TITLE_FIELD, hit.get("title", ""))
+    desc = hit.get(DESCRIPTION_FIELD, "")
+    spec = hit.get(SPEC_TEXT_FIELD, "")
+    for candidate in (title, desc, spec):
+        t = infer_type_from_text(candidate)
+        if t:
+            return t
+    return None
+
+
+def infer_type_from_hits(hits: List[Dict[str, Any]], top_k: int = 20) -> Optional[str]:
+    votes: Dict[str, float] = {}
+    for h in hits[:top_k]:
+        t = infer_type_from_hit(h)
+        if not t:
+            continue
+        # score-weighted voting
+        score = float(h.get('_score', 1.0))
+        votes[t] = votes.get(t, 0.0) + max(0.5, score)
+    if not votes:
+        return None
+    # return the type with the highest cumulative score
+    return max(votes.items(), key=lambda kv: kv[1])[0]
+
+
+def postfilter_hits_by_type(hits: List[Dict[str, Any]], target_type: str) -> List[Dict[str, Any]]:
+    """If OBJECT_TYPE_FIELD is missing, filter by keywords in title/description/spec."""
+    filtered = []
+    kws = TYPE_KEYWORDS.get(target_type, [target_type])
+    kws = [k.lower() for k in kws]
+    for h in hits:
+        blob = " ".join([
+            normalize_text(h.get(TITLE_FIELD, h.get("title", ""))),
+            normalize_text(h.get(DESCRIPTION_FIELD, "")),
+            normalize_text(h.get(SPEC_TEXT_FIELD, "")),
+        ])
+        if any(kw in blob for kw in kws):
+            filtered.append(h)
+    return filtered
+
+# =============================================================
+# Marqo search (HTTP API)
+# =============================================================
+
+def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    Performs a search on Marqo with weighted attributes and optional pre-filtering for accuracy.
+    Performs a tensor search on Marqo.
+    q can be a text phrase or an image URL accessible to Marqo.
     """
-    # Give more weight to the image field to prioritize visual similarity
     searchable_attributes_with_weights = {
-        IMAGE_FIELD: 1.5,
-        TITLE_FIELD: 1.0
+        IMAGE_FIELD: 2.0,                # prioritize visual similarity
+        TITLE_FIELD: 1.1,
+        DESCRIPTION_FIELD: 1.0,
+        SPEC_TEXT_FIELD: 0.9,
+        SEARCH_BLOB_FIELD: 0.8,
     }
 
-    payload = {
-        "limit": 1000,
-        "q": query,
+    payload: Dict[str, Any] = {
+        "limit": limit,
+        "q": q,
         "searchMethod": "TENSOR",
         "searchableAttributes": searchable_attributes_with_weights,
-        "attributesToRetrieve": ["_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD, SKU_FIELD]
+        "attributesToRetrieve": [
+            "_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD,
+            SKU_FIELD, OBJECT_TYPE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD,
+            SEARCH_BLOB_FIELD, CLICK_URL_FIELD
+        ]
     }
-    
-    # Add the pre-filter if provided
+
     if filter_string:
         payload["filter"] = filter_string
-    
+
     url = f"{MARQO_URL}/indexes/{INDEX_NAME}/search"
-    
     try:
         resp = requests.post(url, json=payload, headers=HEADERS, timeout=60)
         resp.raise_for_status()
-        try:
-            return resp.json()
-        except json.JSONDecodeError:
-            st.error("Gautas sėkmingas atsakymas iš serverio, bet jame nebuvo JSON duomenų.")
-            with st.expander("📄 Rodyti visą serverio atsakymą"):
-                st.code(resp.text, language='html')
-            return None
+        return resp.json()
     except requests.exceptions.RequestException as e:
         st.error(f"API paieškos klaida: {e}")
         if getattr(e, 'response', None) is not None and e.response.text:
-            with st.expander("📄 Rodyti visą serverio atsakymą (neapkarpyta)"):
-                st.code(e.response.text, language='html')
-        else:
-            st.warning("Serveris negrąžino jokio atsakymo turinio.")
+            with st.expander("📄 Serverio atsakymas"):
+                st.code(e.response.text, language='json')
         return None
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
 
-st.set_page_config(page_title="Baldų paieška", layout="centered")
+def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], alpha: float = 0.7) -> List[Dict[str, Any]]:
+    """Weighted late-fusion of two hit lists by _id. alpha weighs image scores."""
+    def to_map(hits):
+        return {h.get('_id'): float(h.get('_score', 0.0)) for h in hits}
+    imap, tmap = to_map(img_hits), to_map(txt_hits)
+    ids = set(imap) | set(tmap)
+    fused = []
+    for _id in ids:
+        s = alpha * imap.get(_id, 0.0) + (1 - alpha) * tmap.get(_id, 0.0)
+        # pick a representative hit (prefer image list metadata)
+        base = next((h for h in img_hits if h.get('_id') == _id), None) or next((h for h in txt_hits if h.get('_id') == _id), None)
+        if not base:
+            continue
+        h = dict(base)
+        h['_fused_score'] = s
+        fused.append(h)
+    fused.sort(key=lambda x: x.get('_fused_score', x.get('_score', 0.0)), reverse=True)
+    return fused
+
+# =============================================================
+# UI
+# =============================================================
+
+st.set_page_config(page_title="Baldų paieška", layout="wide")
 st.title("🛋️ Baldų ir interjero elementų paieška")
-st.markdown("Įkelkite produkto nuotrauką arba įveskite raktažodį, kad rastumėte panašius baldus ir interjero elementus.")
+st.caption("Įkelkite produkto nuotrauką arba įveskite raktažodžius. Sistema ieškos tik tarp to paties tipo objektų (pvz., įkėlę lempos nuotrauką – ieškos lempų).")
 
-
-# Initialize session state variables
+# Session state
 for key, default in (
     ('last_upload_hash', None), ('search_results', None), ('query_color', None),
-    ('page', 0), ('detected_object_type', None)
+    ('page', 0), ('detected_object_type', None), ('selected_object_type', None),
 ):
     if key not in st.session_state:
         st.session_state[key] = default
 
-# --- Sidebar Controls ---
+# Sidebar controls
 st.sidebar.header("Paieškos nustatymai")
 uploaded_file = st.sidebar.file_uploader(
-    "Pasirinkite paveikslėlį", 
-    type=["jpg", "jpeg", "png", "gif", "bmp", "webp"], 
+    "Pasirinkite paveikslėlį",
+    type=["jpg", "jpeg", "png", "gif", "bmp", "webp"],
     key="uploader"
 )
 search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą:", "")
-color_threshold = st.sidebar.slider(
-    "Spalvos panašumo riba", 0, 200, 50, 10,
-    format="%d", help="Kairėje – labiau panaši, dešinėje – mažiau panaši"
-)
+color_threshold = st.sidebar.slider("Spalvos panašumo riba", 0, 200, 50, 10)
 use_color_filter = st.sidebar.checkbox("Įjungti spalvos filtravimą", value=True)
 
+# Object type manual override (will be filled after inference)
+if st.session_state.detected_object_type:
+    # Build choices from TYPE_KEYWORDS keys for cleaner options
+    type_choices = list(TYPE_KEYWORDS.keys())
+    default_idx = type_choices.index(st.session_state.detected_object_type) if st.session_state.detected_object_type in type_choices else 0
+    st.sidebar.selectbox(
+        "🧠 Aptiktas tipas (galite pakeisti)",
+        options=type_choices,
+        index=default_idx,
+        key='selected_object_type',
+        help="Sistema apribos paiešką iki pasirinkto tipo."
+    )
 
-# --- Main Logic ---
+# -----------------------------
+# Main logic
+# -----------------------------
+
+results_payload: Optional[Dict[str, Any]] = None
+
 if uploaded_file:
-    st.sidebar.image(uploaded_file, caption="Įkeltas paveikslėlis", width=150)
+    st.sidebar.image(uploaded_file, caption="Įkeltas paveikslėlis", width=180)
     img_bytes = uploaded_file.getvalue()
     current_hash = hash(img_bytes)
 
-    if current_hash != st.session_state.last_upload_hash or color_threshold != st.session_state.get('last_color_threshold', -1):
+    if current_hash != st.session_state.last_upload_hash:
         st.session_state.last_upload_hash = current_hash
-        st.session_state.last_color_threshold = color_threshold
         st.session_state.page = 0
 
+        # Upload query image to R2 for a stable, public URL
         try:
             query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
         except Exception as e:
             st.error(f"Nepavyko įkelti į R2: {e}")
             st.stop()
 
-        query_color = get_dominant_color(img_bytes)
-        st.session_state.query_color = query_color
+        # Dominant color (for optional refinement)
+        st.session_state.query_color = get_dominant_color(img_bytes)
 
-        # First, detect the object type from the first search result to use as a filter
-        with st.spinner("Analizuojamas paveikslėlis..."):
-            initial_results = marqo_search(query_url)
-            if initial_results and initial_results.get("hits"):
-                first_hit_title = initial_results["hits"][0].get(TITLE_FIELD, "")
-                detected_type = detect_object_type(first_hit_title)
-                st.session_state.detected_object_type = detected_type
-                
-                # Now, perform the main search WITH the pre-filter
-                filter_query = f"object_type:{detected_type}"
-                st.info(f"Ieškoma panašių objektų, priskiriamų tipui: '{detected_type}'")
-                main_results = marqo_search(query_url, filter_string=filter_query)
-                st.session_state.search_results = main_results
+        with st.spinner("Analizuojamas paveikslėlis ir nustatomas tipas..."):
+            # Step 1: broad image search (no filter) to infer type from TOP-K
+            probe = marqo_search(query_url, limit=200)
+            hits = probe.get("hits", []) if probe else []
+            inferred = infer_type_from_hits(hits, top_k=30) or ""
+            st.session_state.detected_object_type = inferred
+            st.session_state.selected_object_type = inferred or st.session_state.selected_object_type
+
+            # Build a filter if the index stores OBJECT_TYPE_FIELD
+            filter_query = None
+            if inferred:
+                # Try hard filter first (requires OBJECT_TYPE_FIELD in index)
+                filter_query = f'{OBJECT_TYPE_FIELD}:"{inferred}"'
+
+            # Step 2: image search WITH hard filter (when possible)
+            main_img = marqo_search(query_url, limit=200, filter_string=filter_query) if filter_query else marqo_search(query_url, limit=200)
+            img_hits = main_img.get("hits", []) if main_img else []
+
+            # If OBJECT_TYPE is missing from index, post-filter by keywords
+            if inferred and (not img_hits or OBJECT_TYPE_FIELD not in img_hits[0]):
+                img_hits = postfilter_hits_by_type(img_hits, inferred)
+
+            # Optional: if the user also typed text, do a text search (same filter) and fuse
+            if search_query.strip():
+                txt_res = marqo_search(search_query.strip(), limit=200, filter_string=filter_query)
+                txt_hits = txt_res.get("hits", []) if txt_res else []
+                if inferred and (not txt_hits or (txt_hits and OBJECT_TYPE_FIELD not in txt_hits[0])):
+                    txt_hits = postfilter_hits_by_type(txt_hits, inferred)
+                fused = fuse_hits(img_hits, txt_hits, alpha=0.75)
+                results_payload = {"hits": fused}
             else:
-                st.session_state.search_results = {"hits": []}
-
+                results_payload = {"hits": img_hits}
 
 elif search_query.strip():
-    with st.spinner("Ieškoma pagal raktažodį..."):
-        results = marqo_search(search_query) # Text search does not use pre-filtering
-        if results and results.get("hits"):
-            for hit in results["hits"]:
-                title = hit.get(TITLE_FIELD, hit.get("title", ""))
-                hit["object_type"] = detect_object_type(title)
-            st.session_state.search_results = results
-        else:
-            st.session_state.search_results = {"hits": []}
+    with st.spinner("Ieškoma pagal tekstą..."):
+        # Text-only search (no image). Use manual type from sidebar if present.
+        filter_query = None
+        manual_t = st.session_state.selected_object_type
+        if manual_t:
+            filter_query = f'{OBJECT_TYPE_FIELD}:"{manual_t}"'
+        txt = marqo_search(search_query.strip(), limit=200, filter_string=filter_query)
+        hits = txt.get("hits", []) if txt else []
+        # If no hard type field, try post-filter by manual type
+        if manual_t and (not hits or OBJECT_TYPE_FIELD not in hits[0]):
+            hits = postfilter_hits_by_type(hits, manual_t)
+        results_payload = {"hits": hits}
 else:
-    st.session_state.search_results = None
-    st.session_state.last_upload_hash = None
-    st.session_state.query_color = None
+    results_payload = None
     st.session_state.page = 0
 
+# =============================================================
+# Render results
+# =============================================================
 
-# --- Results Rendering ---
-results_data = st.session_state.search_results
-if results_data and results_data.get("hits"):
-    hits = results_data["hits"]
+if results_payload and results_payload.get("hits"):
+    hits = list(results_payload["hits"])  # copy
 
-    # Post-processing filters
+    # Optional color filter (applies mainly to image queries)
     if uploaded_file and use_color_filter and st.session_state.query_color is not None:
-        query_color = st.session_state.query_color
-        filtered_by_color = []
-        for hit in hits:
-            hit_color_hex = hit.get(DOM_COLOR_FIELD, "#000000")
-            hit_rgb = hex_to_rgb(hit_color_hex)
-            dist = color_distance(query_color, hit_rgb)
+        qcol = st.session_state.query_color
+        filtered = []
+        for h in hits:
+            hcol_hex = h.get(DOM_COLOR_FIELD, "#000000")
+            h_rgb = hex_to_rgb(hcol_hex)
+            dist = color_distance(qcol, h_rgb)
             if dist <= color_threshold + 5:
-                hit["_adj_score"] = hit.get('_score', 0) - (dist / 441.0)
-                filtered_by_color.append(hit)
-        hits = filtered_by_color
+                h['_adj_score'] = h.get('_fused_score', h.get('_score', 0.0)) - (dist / 441.0)
+                filtered.append(h)
+        hits = filtered
 
-    if uploaded_file and search_query.strip():
-        keyword = search_query.lower()
-        hits = [h for h in hits if keyword in (h.get(TITLE_FIELD, h.get("title", "")).lower())]
+    # Final sort by fused/score
+    hits.sort(key=lambda h: h.get('_adj_score', h.get('_fused_score', h.get('_score', 0.0))), reverse=True)
 
-    hits.sort(key=lambda h: h.get('_adj_score', h.get('_score', 0)), reverse=True)
-    
+    # Pagination
     page_size = 9
     total_pages = (len(hits) - 1) // page_size + 1 if hits else 0
     current_page = st.session_state.page
 
-    if not hits:
-        st.info("Rezultatų nerasta. Pabandykite įkelti kitą paveikslėlį arba pakeisti filtrus.")
-    else:
-        st.subheader(f"Rasta rezultatų: {len(hits)}")
-        
-        col_prev, col_pg, col_next = st.columns([2, 8, 2])
-        with col_prev:
-            if st.button("⬅ Ankstesnis", disabled=(current_page == 0)):
-                st.session_state.page -= 1
-                st.rerun()
-        with col_pg:
-             st.markdown(f"<div style='text-align: center;'>Puslapis {current_page + 1} iš {total_pages}</div>", unsafe_allow_html=True)
-        with col_next:
-            if st.button("Kitas ➡", disabled=(current_page >= total_pages - 1)):
-                st.session_state.page += 1
-                st.rerun()
+    st.subheader(f"Rasta rezultatų: {len(hits)}")
 
-        start = current_page * page_size
-        end = start + page_size
-        page_hits = hits[start:end]
+    # Show detected/selected type
+    if st.session_state.selected_object_type:
+        st.info(f"🔒 Paieška apribota tipui: **{st.session_state.selected_object_type}**")
 
-        cols = st.columns(3)
-        for i, hit in enumerate(page_hits):
-            with cols[i % 3]:
-                img_url = hit.get(IMAGE_FIELD) or hit.get(ALT_IMAGE_FIELD) or hit.get("image")
-                title = hit.get(TITLE_FIELD, hit.get('title', 'Be pavadinimo'))
-                _id = hit.get('_id', 'Nėra')
-                score = hit.get('_score')
+    col_prev, col_pg, col_next = st.columns([2, 8, 2])
+    with col_prev:
+        if st.button("⬅ Ankstesnis", disabled=(current_page == 0)):
+            st.session_state.page -= 1
+            st.rerun()
+    with col_pg:
+        st.markdown(f"<div style='text-align:center;'>Puslapis {current_page + 1} iš {total_pages}</div>", unsafe_allow_html=True)
+    with col_next:
+        if st.button("Kitas ➡", disabled=(current_page >= total_pages - 1)):
+            st.session_state.page += 1
+            st.rerun()
 
-                if img_url:
-                    st.image(img_url, use_container_width=True)
-                st.write(f"**{title}**")
-                st.caption(f"ID: {_id}")
-                if isinstance(score, (int, float)):
-                    st.write(f"Panašumas: {score:.2f}")
-                st.markdown("---")
+    start = current_page * page_size
+    end = start + page_size
+    page_hits = hits[start:end]
 
-elif results_data is not None:
-    st.info("Rezultatų nerasta. Pabandykite įkelti paveikslėlį arba įvesti raktažodį.")
+    cols = st.columns(3)
+    for i, h in enumerate(page_hits):
+        with cols[i % 3]:
+            img_url = h.get(IMAGE_FIELD) or h.get(ALT_IMAGE_FIELD) or h.get("image")
+            title = h.get(TITLE_FIELD, h.get('title', 'Be pavadinimo'))
+            _id = h.get('_id', 'Nėra')
+            obj_t = h.get(OBJECT_TYPE_FIELD) or infer_type_from_hit(h) or "—"
+            score = h.get('_fused_score', h.get('_score', None))
+            click_url = h.get(CLICK_URL_FIELD)
+
+            if img_url:
+                st.image(img_url, use_container_width=True)
+            st.write(f"**{title}**")
+            st.caption(f"ID: {_id} · Tipas: {obj_t}")
+            if isinstance(score, (int, float)):
+                st.caption(f"Panašumas: {score:.3f}")
+            if isinstance(click_url, str) and click_url:
+                st.markdown(f"[🔗 Atidaryti produktą]({click_url})")
+            st.markdown("---")
+
+elif results_payload is not None:
+    st.info("Rezultatų nerasta. Pabandykite kitą nuotrauką, pakeiskite tipą arba atlaisvinkite filtrus.")
 else:
-    st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę šoninėje juostoje.")
+    st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę.")

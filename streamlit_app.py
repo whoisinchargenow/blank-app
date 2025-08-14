@@ -15,15 +15,6 @@ import boto3
 # =============================================================
 # Streamlit App: Visual Search with "same-type" gating (Marqo + R2)
 # =============================================================
-# Key upgrades vs your version:
-# 1) Robust object-type inference from TOP-K image hits using rich keyword map
-# 2) Hard filter by OBJECT_TYPE field when present in the index; otherwise
-#    post-filter by inferred type (title/description/spec_text keywords)
-# 3) Optional fusion of image and text queries (image + user text) with
-#    weighted score merge
-# 4) Searchable attributes expanded to include name/description/spec_text
-# 5) UI chip showing detected/selected type with manual override
-# =============================================================
 
 # -----------------------------
 # Config (from secrets or ENV)
@@ -44,6 +35,7 @@ ALT_IMAGE_FIELD: str = _cfg("ALT_IMAGE_FIELD", "image_url") or "image_url"
 DESCRIPTION_FIELD: str = _cfg("DESCRIPTION_FIELD", "description") or "description"
 SPEC_TEXT_FIELD: str = _cfg("SPEC_TEXT_FIELD", "spec_text") or "spec_text"
 SEARCH_BLOB_FIELD: str = _cfg("SEARCH_BLOB_FIELD", "search_blob") or "search_blob"
+# This is the HEX field for display, the filter will use r, g, b fields
 DOM_COLOR_FIELD: str = _cfg("DOMINANT_COLOR_FIELD", "dominant_color") or "dominant_color"
 OBJECT_TYPE_FIELD: str = _cfg("OBJECT_TYPE_FIELD", "object_type") or "object_type"
 SKU_FIELD: str = _cfg("SKU_FIELD", "product_id") or "product_id"
@@ -65,95 +57,12 @@ if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
     HEADERS["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID
     HEADERS["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET
 
-# Known, normalized object types we support for gating
-KNOWN_TYPES = [
-    "lamp", "light", "wall lamp", "floor lamp", "table lamp", "pendant", "chandelier", "sconce",
-    "table", "coffee table", "side table", "console table", "dining table",
-    "sofa", "couch", "loveseat", "sectional",
-    "chair", "armchair", "stool", "bench",
-    "rack", "shelf", "shelving",
-    "bed", "cabinet", "desk", "trolley", "mirror", "vase", "tray", "carpet", "rug"
-]
-
-# Rich keyword map to catch synonyms/variants for inference & filtering
-TYPE_KEYWORDS = {
-    # Fireplace & accessories
-    "andiron": ["andiron", "fire dog", "firedog"],
-    "fire tools": ["fire tools", "fireplace tools", "fire poker", "fireplace set"],
-
-    # Botanicals
-    "artificial flowers & plants": ["artificial flowers", "faux flowers", "faux plants", "artificial plant", "silk flowers", "artificial greenery", "artificial palm"],
-
-    # Small objects & decor
-    "ashtray": ["ashtray"],
-    "basket": ["basket", "wicker basket", "storage basket"],
-    "bowl": ["bowl", "decorative bowl"],
-    "box": ["box", "storage box", "decorative box"],
-    "bust": ["bust", "sculpture bust", "head sculpture"],
-    "candle holder": ["candle holder", "candlestick", "candelabra", "tealight holder", "tea light holder"],
-    "decanter": ["decanter", "carafe", "wine decanter"],
-    "desk accessory": ["desk accessory", "desk organizer", "pen holder", "paper tray"],
-    "globe": ["globe", "world globe"],
-    "hurricane": ["hurricane", "hurricane lamp", "hurricane candle holder"],
-    "jar": ["jar", "storage jar", "ginger jar"],
-    "lighter holder": ["lighter holder", "lighter case"],
-    "object": ["object", "decorative object", "decor object"],
-    "picture frame": ["picture frame", "photo frame"],
-    "plaid": ["plaid", "throw", "blanket", "tartan throw"],
-    "planter": ["planter", "flower pot", "plant pot", "cachepot"],
-    "pouf": ["pouf", "pouffe"],
-    "print": ["print", "art print", "poster"],
-    "sculpture": ["sculpture", "statue", "figurine"],
-    "stand": ["stand", "display stand", "pedestal stand"],
-    "tray": ["tray"],
-    "umbrella stand": ["umbrella stand"],
-    "vase": ["vase"],
-    "wall art": ["wall art", "wall print", "wall picture"],
-    "wall decoration": ["wall decoration", "wall decor", "wall ornament"],
-    "wine cooler": ["wine cooler", "wine chiller"],
-    "wine rack": ["wine rack", "bottle rack"],
-
-    # Furniture
-    "bar": ["bar", "bar table", "bar furniture", "home bar", "bar cabinet", "bar counter"],
-    "bed": ["bed", "bedframe", "bed frame"],
-    "bench": ["bench", "entryway bench", "bedroom bench"],
-    "cabinet": ["cabinet", "storage cabinet", "display cabinet"],
-    "cake standard": ["cake standard", "cake stand"],
-    "chair": ["chair", "armchair", "dining chair", "side chair"],
-    "coatrack": ["coat rack", "coatrack", "coat stand", "hall stand"],
-    "column": ["column", "pedestal"],
-    "cushion": ["cushion", "pillow", "throw pillow"],
-    "daybed": ["daybed", "chaise lounge", "chaise longue"],
-    "desk": ["desk", "writing desk"],
-    "dresser": ["dresser", "chest of drawers", "drawer chest"],
-    "headboard": ["headboard", "bed headboard"],
-    "lamp": ["lamp", "light", "wall lamp", "floor lamp", "table lamp", "pendant", "chandelier", "sconce", "wall light"],
-    "lantern": ["lantern", "candle lantern"],
-    "mirror": ["mirror", "wall mirror"],
-    "nightstand": ["nightstand", "bedside table", "bedside cabinet"],
-    "ottoman": ["ottoman", "footstool", "foot stool"],
-    "rug": ["rug", "carpet"],
-    "sofa": ["sofa", "couch", "loveseat", "sectional"],
-    "stool": ["stool", "bar stool", "counter stool"],
-    "table": ["table", "coffee table", "side table", "console table", "dining table"],
-    "trolley": ["trolley", "bar cart", "serving cart"],
-    "trunk": ["trunk", "storage trunk"],
-    "tv cabinet": ["tv cabinet", "tv stand", "media console", "media unit"],
-    "wall rack": ["wall rack", "wall shelf", "wall-mounted rack"],
-}
-
-# Search attribute sets for dual-search fusion
-TEXT_ATTRS = [TITLE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD, SEARCH_BLOB_FIELD]
-VISUAL_ATTRS = [IMAGE_FIELD]
-
 # Tensor fields available in the current index (keep in sync with your indexer)
 KNOWN_TENSOR_FIELDS = {"name", "description", "image", "spec_text", "search_blob"}
 
 
 def sanitize_attrs(attrs: List[str]) -> List[str]:
-    """Map aliases (e.g., 'title' -> 'name'), drop unknowns, ensure non-empty.
-    This prevents Marqo from rejecting the request when an invalid tensor field is sent.
-    """
+    """Map aliases, drop unknowns, and ensure the list is not empty."""
     out: List[str] = []
     for a in attrs:
         a = (a or "").strip()
@@ -165,17 +74,16 @@ def sanitize_attrs(attrs: List[str]) -> List[str]:
         if a in KNOWN_TENSOR_FIELDS and a not in out:
             out.append(a)
     if not out:
-        # last resort: use image only
         out = ["image"] if "image" in KNOWN_TENSOR_FIELDS else list(KNOWN_TENSOR_FIELDS)
     return out
 
 # =============================================================
-# R2 helpers (upload the query image)
+# R2 helpers (for uploading the query image)
 # =============================================================
 
 def _r2_client():
     if not (R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and R2_ENDPOINT_URL):
-        raise RuntimeError("R2 credentials or endpoint missing. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT_URL in secrets.")
+        raise RuntimeError("R2 credentials or endpoint missing.")
     return boto3.client(
         "s3",
         endpoint_url=R2_ENDPOINT_URL,
@@ -195,146 +103,39 @@ def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
     return f"{PUBLIC_BASE_URL.rstrip('/')}/{key}"
 
 # =============================================================
-# Color helpers (optional color gating)
+# Color helpers (for analyzing the query image)
 # =============================================================
 
-def get_dominant_color(image_bytes: bytes) -> np.ndarray:
-    """Estimate the dominant *object* colour with robust fallbacks.
-    Strategy:
-      1) Center-weight + saturation/value mask → KMeans over top-weighted pixels.
-      2) Relax thresholds if no samples.
-      3) Edge-weight mask (gradient on V channel) if still no samples.
-      4) Palette quantization fallback (PIL adaptive palette).
-      5) Final fallback: global mean RGB.
-    Always returns an RGB np.ndarray[int] shape (3,).
-    """
+def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
+    """Estimate the dominant object colour of the query image."""
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-    except Exception:
-        return np.array([0, 0, 0])
+        img.thumbnail((150, 150)) # Resize for faster processing
+        pixels = np.array(img, dtype=np.float32) / 255.0
+        pixels = pixels.reshape(-1, 3)
 
-    img = img.resize((160, 160))
-    rgb = np.asarray(img, dtype=np.float32) / 255.0  # (H,W,3)
-    hsv = np.asarray(img.convert('HSV'), dtype=np.float32) / 255.0
-    s = hsv[..., 1]
-    v = hsv[..., 2]
+        # Remove black and white pixels from consideration
+        non_bw_mask = (pixels.mean(axis=1) > 0.05) & (pixels.mean(axis=1) < 0.95)
+        pixels = pixels[non_bw_mask]
 
-    H, W = s.shape
-    yy, xx = np.mgrid[0:H, 0:W]
-    cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
-    center_w = np.exp(-(((xx - cx) / (0.45 * W)) ** 2 + ((yy - cy) / (0.45 * H)) ** 2))
-
-    def _kmeans_pick(samples: np.ndarray) -> Optional[np.ndarray]:
-        if samples is None or samples.size == 0:
-            return None
-        k = 3 if samples.shape[0] >= 600 else 2
-        try:
-            km = KMeans(n_clusters=k, n_init=10, random_state=0)
-            km.fit(samples)
-            labels = km.labels_
-            centers = km.cluster_centers_
-            # score by cluster size * saturation
-            scores = []
-            for ki in range(centers.shape[0]):
-                idx = (labels == ki)
-                if not np.any(idx):
-                    scores.append(-1)
-                    continue
-                mean_rgb = samples[idx].mean(axis=0)
-                mx, mn = float(np.max(mean_rgb)), float(np.min(mean_rgb))
-                sat = 0.0 if mx <= 1e-6 else (mx - mn) / mx
-                scores.append(idx.mean() * (sat + 0.05))
-            best = int(np.argmax(scores))
-            c = np.clip((centers[best] * 255.0).round().astype(int), 0, 255)
-            return c
-        except Exception:
+        if len(pixels) == 0:
             return None
 
-    flat_rgb = rgb.reshape(-1, 3)
+        kmeans = KMeans(n_clusters=3, n_init='auto', random_state=0).fit(pixels)
+        unique, counts = np.unique(kmeans.labels_, return_counts=True)
+        dominant_color_float = kmeans.cluster_centers_[unique[counts.argmax()]]
 
-    # Pass 1: strict mask
-    weights = center_w * (0.3 + 0.7 * s)
-    mask = (s >= 0.22) & (v >= 0.10) & (v <= 0.95)
-    w_flat = (weights * mask).reshape(-1)
-    if np.any(w_flat > 0):
-        thr = np.quantile(w_flat[w_flat > 0], 0.75)
-        sel = flat_rgb[w_flat >= max(thr, 1e-6)]
-        col = _kmeans_pick(sel)
-        if col is not None:
-            return col
-
-    # Pass 2: relaxed mask
-    mask2 = (s >= 0.05) & (v >= 0.08) & (v <= 0.98)
-    w_flat2 = (center_w * (0.2 + 0.8 * s) * mask2).reshape(-1)
-    if np.any(w_flat2 > 0):
-        thr2 = np.quantile(w_flat2[w_flat2 > 0], 0.6)
-        sel2 = flat_rgb[w_flat2 >= max(thr2, 1e-6)]
-        col = _kmeans_pick(sel2)
-        if col is not None:
-            return col
-
-    # Pass 3: edge mask on V channel
-    gx = np.zeros_like(v)
-    gy = np.zeros_like(v)
-    gx[:, 1:-1] = np.abs(v[:, 2:] - v[:, :-2])
-    gy[1:-1, :] = np.abs(v[2:, :] - v[:-2, :])
-    edge = gx + gy
-    if float(edge.max()) > 0:
-        e = edge / (edge.max() + 1e-6)
-        sel3 = flat_rgb[(e >= np.quantile(e, 0.6)).reshape(-1)]
-        col = _kmeans_pick(sel3)
-        if col is not None:
-            return col
-
-    # Pass 4: palette quantization
-    try:
-        pal = img.convert('P', palette=Image.ADAPTIVE, colors=6)
-        palette = pal.getpalette()
-        counts = pal.getcolors()
-        if counts:
-            counts.sort(reverse=True)
-            for cnt, idx in counts:
-                r, g, b = palette[idx*3: idx*3+3]
-                # skip near white/black
-                if not ((r > 245 and g > 245 and b > 245) or (r < 10 and g < 10 and b < 10)):
-                    return np.array([int(r), int(g), int(b)])
-            r, g, b = palette[counts[0][1]*3: counts[0][1]*3+3]
-            return np.array([int(r), int(g), int(b)])
+        return (dominant_color_float * 255).astype(int)
     except Exception:
-        pass
-
-    # Pass 5: global mean
-    mean = (rgb.mean(axis=(0, 1)) * 255.0).round().astype(int)
-    return np.array([int(mean[0]), int(mean[1]), int(mean[2])])
-
-
-def hex_to_rgb(hex_color: str) -> np.ndarray:
-    hex_color = (hex_color or "").lstrip('#')
-    if len(hex_color) != 6:
-        return np.array([0, 0, 0])
-    return np.array([int(hex_color[i:i+2], 16) for i in (0, 2, 4)])
-
-
-def color_distance(c1: np.ndarray, c2: np.ndarray) -> float:
-    return float(np.linalg.norm(c1 - c2))
+        return None
 
 # =============================================================
 # Marqo search (HTTP API)
 # =============================================================
-# =============================================================
 
 def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
-    """
-    Performs a tensor search on Marqo.
-    q can be a text phrase or an image URL accessible to Marqo.
-    """
-    searchable_attributes = sanitize_attrs(attrs or [
-        IMAGE_FIELD,
-        TITLE_FIELD,
-        DESCRIPTION_FIELD,
-        SPEC_TEXT_FIELD,
-        SEARCH_BLOB_FIELD,
-    ])
+    """Performs a tensor search on Marqo, now with pre-filtering."""
+    searchable_attributes = sanitize_attrs(attrs or [IMAGE_FIELD, TITLE_FIELD, SEARCH_BLOB_FIELD])
 
     payload: Dict[str, Any] = {
         "limit": limit,
@@ -357,15 +158,15 @@ def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, 
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"API paieškos klaida: {e}")
+        st.error(f"API search error: {e}")
         if getattr(e, 'response', None) is not None and e.response.text:
-            with st.expander("📄 Serverio atsakymas"):
+            with st.expander("📄 Server Response"):
                 st.code(e.response.text, language='json')
         return None
 
 
 def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], alpha: float = 0.7) -> List[Dict[str, Any]]:
-    """Weighted late-fusion of two hit lists by _id. alpha weighs image scores."""
+    """Weighted late-fusion of two hit lists by _id."""
     def to_map(hits):
         return {h.get('_id'): float(h.get('_score', 0.0)) for h in hits}
     imap, tmap = to_map(img_hits), to_map(txt_hits)
@@ -373,188 +174,134 @@ def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], al
     fused = []
     for _id in ids:
         s = alpha * imap.get(_id, 0.0) + (1 - alpha) * tmap.get(_id, 0.0)
-        # pick a representative hit (prefer image list metadata)
         base = next((h for h in img_hits if h.get('_id') == _id), None) or next((h for h in txt_hits if h.get('_id') == _id), None)
         if not base:
             continue
         h = dict(base)
         h['_fused_score'] = s
         fused.append(h)
-    fused.sort(key=lambda x: x.get('_fused_score', x.get('_score', 0.0)), reverse=True)
+    fused.sort(key=lambda x: x.get('_fused_score', 0.0), reverse=True)
     return fused
 
 # =============================================================
 # UI
 # =============================================================
 
-st.set_page_config(page_title="Baldų paieška", layout="wide")
-st.title("🛋️ Baldų ir interjero elementų paieška")
-st.caption("Sistema pirmiausia ieško vizualiai panašių produktų. Tekstas – papildomas signalas.")
+st.set_page_config(page_title="Furniture Search", layout="wide")
+st.title("🛋️ Furniture and Interior Element Search")
+st.caption("The system primarily searches for visually similar products. Text provides an additional signal.")
 
-# Session state
-for key, default in (
-    ('last_upload_hash', None), ('search_results', None), ('query_color', None), ('base_hits', None), ('last_color_threshold', None),
-    ('color_filter_hidden', False), ('use_color_filter', True), ('color_controls_rerolled', False), ('color_threshold', 50),
-    ('page', 0),
-):
-    if key not in st.session_state:
-        st.session_state[key] = default
+# Session state initialization
+if 'page' not in st.session_state:
+    st.session_state.page = 0
 
 # Sidebar controls
-st.sidebar.header("Paieškos nustatymai")
+st.sidebar.header("Search Settings")
 uploaded_file = st.sidebar.file_uploader(
-    "Pasirinkite paveikslėlį",
-    type=["jpg", "jpeg", "png", "gif", "bmp", "webp"],
+    "Choose an image",
+    type=["jpg", "jpeg", "png", "webp"],
     key="uploader"
 )
-search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą:", "")
-if st.session_state.get('color_filter_hidden', False):
-    # Hide color controls and force filter off
-    st.session_state['use_color_filter'] = False
-    color_threshold = st.session_state.get('color_threshold', 50)
-    use_color_filter = False
-else:
-    color_threshold = st.sidebar.slider("Spalvos panašumo riba", 0, 200, st.session_state.get('color_threshold', 50), 10, key='color_threshold')
-    use_color_filter = st.sidebar.checkbox("Įjungti spalvos filtravimą", value=st.session_state.get('use_color_filter', True), key='use_color_filter')
+search_query = st.sidebar.text_input("🔍 Search by text:", "")
+
+# --- MODIFIED: Simplified color filter controls ---
+use_color_filter = st.sidebar.checkbox("Enable color filtering", value=True)
+color_threshold = st.sidebar.slider("Color similarity threshold", 0, 150, 50, 10)
 
 # Boosting weights
-visual_weight = 0.85  # vizualinis signalas svarbiausias
+visual_weight = 0.85
 text_weight = 0.35 if search_query.strip() else 0.0
 
 results_payload: Optional[Dict[str, Any]] = None
+final_hits = []
 
+# --- MODIFIED: Main search logic with pre-filtering ---
 if uploaded_file:
-    st.sidebar.image(uploaded_file, caption="Įkeltas paveikslėlis", width=180)
+    st.sidebar.image(uploaded_file, caption="Uploaded Image", width=180)
     img_bytes = uploaded_file.getvalue()
-    current_hash = hash(img_bytes)
-    if st.session_state.get('last_upload_hash') != current_hash:
-        st.session_state['last_upload_hash'] = current_hash
-        st.session_state['color_filter_hidden'] = False
-        st.session_state['color_controls_rerolled'] = False
-        # (removed) avoid setting widget state mid-run to prevent StreamlitAPIException
+
     try:
         query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
     except Exception as e:
-        st.error(f"Nepavyko įkelti į R2: {e}")
+        st.error(f"Failed to upload to R2: {e}")
         st.stop()
 
-    st.session_state.query_color = get_dominant_color(img_bytes)
+    color_filter_string = None
+    if use_color_filter:
+        query_rgb = get_dominant_color(img_bytes)
+        if query_rgb is not None:
+            r, g, b = query_rgb
+            # Define a bounding box in the RGB color space for the filter
+            r_min, r_max = max(0, r - color_threshold), min(255, r + color_threshold)
+            g_min, g_max = max(0, g - color_threshold), min(255, g + color_threshold)
+            b_min, b_max = max(0, b - color_threshold), min(255, b + color_threshold)
+            color_filter_string = (
+                f"(color_r:[{r_min} TO {r_max}] AND "
+                f"color_g:[{g_min} TO {g_max}] AND "
+                f"color_b:[{b_min} TO {b_max}])"
+            )
+            st.sidebar.info(f"Filtering for colors near RGB({r}, {g}, {b})")
 
-    with st.spinner("Ieškoma vizualiai panašių elementų..."):
-        vis_res = marqo_search(query_url, limit=200, attrs=VISUAL_ATTRS)
-        sem_res = marqo_search(query_url, limit=200, attrs=TEXT_ATTRS)
+    with st.spinner("Searching for visually similar items..."):
+        vis_res = marqo_search(query_url, limit=200, attrs=[IMAGE_FIELD], filter_string=color_filter_string)
+        sem_res = marqo_search(query_url, limit=200, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=color_filter_string)
         vis_hits = vis_res.get("hits", []) if vis_res else []
         sem_hits = sem_res.get("hits", []) if sem_res else []
         fused_img = fuse_hits(vis_hits, sem_hits, alpha=visual_weight)
 
         if search_query.strip():
-            txt_res = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
+            txt_res = marqo_search(search_query.strip(), limit=200, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=color_filter_string)
             txt_hits = txt_res.get("hits", []) if txt_res else []
             final_hits = fuse_hits(fused_img, txt_hits, alpha=1.0 - text_weight) if text_weight > 0 else fused_img
         else:
             final_hits = fused_img
 
-        st.session_state.base_hits = final_hits
-        results_payload = {"hits": final_hits}
-
 elif search_query.strip():
-    with st.spinner("Ieškoma pagal tekstą..."):
-        # Reset color filter hiding for a fresh text-only search
-        st.session_state['color_filter_hidden'] = False
-        st.session_state['color_controls_rerolled'] = False
-        # (removed) avoid setting widget state mid-run to prevent StreamlitAPIException
-        txt_res = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
-        txt_hits = txt_res.get("hits", []) if txt_res else []
-        st.session_state.base_hits = txt_hits
-        results_payload = {"hits": txt_hits}
+    with st.spinner("Searching by text..."):
+        txt_res = marqo_search(search_query.strip(), limit=200, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD])
+        final_hits = txt_res.get("hits", []) if txt_res else []
 else:
-    results_payload = None
-    st.session_state.base_hits = None
-    st.session_state.query_color = None
-    st.session_state.page = 0
+    st.info("Please upload an image or enter a search query.")
+
 
 # =============================================================
 # Render results
 # =============================================================
 
-base_list = results_payload.get("hits") if results_payload else st.session_state.get("base_hits")
-if base_list:
-    hits = list(base_list)
-
-    # Optional color filter (applies mainly to image queries)
-    if uploaded_file and use_color_filter and st.session_state.query_color is not None:
-        qcol = st.session_state.query_color
-        original_hits = list(hits)
-        matches, unknowns = [], []
-
-        def _is_valid_hex(hx: str) -> bool:
-            if not isinstance(hx, str):
-                return False
-            s = hx.lstrip('#')
-            return len(s) == 6 and all(c in '0123456789abcdefABCDEF' for c in s)
-
-        for h in hits:
-            hx = h.get(DOM_COLOR_FIELD)
-            if not _is_valid_hex(hx):
-                unknowns.append(h)
-                continue
-            h_rgb = hex_to_rgb(hx)
-            dist = color_distance(qcol, h_rgb)
-            if dist <= color_threshold + 5:
-                h['_adj_score'] = h.get('_fused_score', h.get('_score', 0.0)) - (dist / 441.0)
-                matches.append(h)
-
-        if matches:
-            hits = matches + (unknowns if len(matches) < 5 else [])
-        else:
-            if unknowns:
-                st.info("Dauguma įrašų neturi spalvos indekse — rodau be spalvų filtro.")
-            st.session_state['color_filter_hidden'] = True
-            # avoid writing to widget state mid-run
-            if not st.session_state.get('color_controls_rerolled', False):
-                st.session_state['color_controls_rerolled'] = True
-                st.rerun()
-            else:
-                st.info("Spalvos filtras pašalino visus rezultatus — rodau be spalvų filtro.")
-            st.session_state['color_filter_hidden'] = True
-            # avoid writing to widget state mid-run
-            if not st.session_state.get('color_controls_rerolled', False):
-                st.session_state['color_controls_rerolled'] = True
-                st.rerun()
-            hits = original_hits
-
-    # Final sort by fused/score
-    hits.sort(key=lambda h: h.get('_adj_score', h.get('_fused_score', h.get('_score', 0.0))), reverse=True)
-
+if final_hits:
+    st.subheader(f"Found {len(final_hits)} results")
+    
     # Pagination
     page_size = 9
-    total_pages = (len(hits) - 1) // page_size + 1 if hits else 0
+    total_pages = (len(final_hits) - 1) // page_size + 1
     current_page = st.session_state.page
 
-    st.subheader(f"Rasta rezultatų: {len(hits)}")
+    # Ensure current_page is valid
+    if current_page >= total_pages:
+        current_page = 0
+        st.session_state.page = 0
 
     col_prev, col_pg, col_next = st.columns([2, 8, 2])
-    with col_prev:
-        if st.button("⬅ Ankstesnis", disabled=(current_page == 0)):
-            st.session_state.page -= 1
-            st.rerun()
-    with col_pg:
-        st.markdown(f"<div style='text-align:center;'>Puslapis {current_page + 1} iš {total_pages}</div>", unsafe_allow_html=True)
-    with col_next:
-        if st.button("Kitas ➡", disabled=(current_page >= total_pages - 1)):
-            st.session_state.page += 1
-            st.rerun()
+    if col_prev.button("⬅ Previous", disabled=(current_page == 0)):
+        st.session_state.page -= 1
+        st.rerun()
+    
+    col_pg.markdown(f"<div style='text-align:center;'>Page {current_page + 1} of {total_pages}</div>", unsafe_allow_html=True)
+    
+    if col_next.button("Next ➡", disabled=(current_page >= total_pages - 1)):
+        st.session_state.page += 1
+        st.rerun()
 
     start = current_page * page_size
     end = start + page_size
-    page_hits = hits[start:end]
+    page_hits = final_hits[start:end]
 
     cols = st.columns(3)
     for i, h in enumerate(page_hits):
         with cols[i % 3]:
-            img_url = h.get(IMAGE_FIELD) or h.get(ALT_IMAGE_FIELD) or h.get("image")
-            title = h.get(TITLE_FIELD, h.get('title', 'Be pavadinimo'))
-            _id = h.get('_id', 'Nėra')
+            img_url = h.get(IMAGE_FIELD) or h.get(ALT_IMAGE_FIELD)
+            title = h.get(TITLE_FIELD, 'No title')
+            _id = h.get('_id', 'N/A')
             score = h.get('_fused_score', h.get('_score', None))
             click_url = h.get(CLICK_URL_FIELD)
 
@@ -563,12 +310,21 @@ if base_list:
             st.write(f"**{title}**")
             st.caption(f"ID: {_id}")
             if isinstance(score, (int, float)):
-                st.caption(f"Panašumas: {score:.3f}")
+                st.caption(f"Similarity: {score:.3f}")
             if isinstance(click_url, str) and click_url:
-                st.markdown(f"[🔗 Atidaryti produktą]({click_url})")
+                st.markdown(f"[🔗 Open Product]({click_url})")
+            
+            # Display dominant color hex if available
+            dom_color_hex = h.get(DOM_COLOR_FIELD)
+            if dom_color_hex:
+                st.markdown(f"""
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <div style="width: 20px; height: 20px; background-color: {dom_color_hex}; border: 1px solid #ccc; border-radius: 4px;"></div>
+                    <span>{dom_color_hex}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
             st.markdown('---')
 
-elif results_payload is not None:
-    st.info("Rezultatų nerasta. Pabandykite kitą paveikslėlį arba įvesti paieškos frazę.")
-else:
-    st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę.")
+elif uploaded_file or search_query:
+    st.warning("No results found. Try adjusting your query or the color filter threshold.")

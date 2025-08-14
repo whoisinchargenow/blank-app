@@ -157,9 +157,9 @@ if uploaded_file:
     color_threshold = st.sidebar.slider("Color similarity threshold", 0, 150, 50, 10)
     
     img_bytes = uploaded_file.getvalue()
-    active_filters = []
-
-    # 1. Build Color Filter
+    
+    # 1. Build Color Filter (for image search)
+    color_filter_string = None
     if use_color_filter:
         query_rgb = get_dominant_color(img_bytes)
         if query_rgb is not None:
@@ -168,7 +168,6 @@ if uploaded_file:
             g_min, g_max = max(0, g - color_threshold), min(255, g + color_threshold)
             b_min, b_max = max(0, b - color_threshold), min(255, b + color_threshold)
             color_filter_string = f"(color_r:[{r_min} TO {r_max}] AND color_g:[{g_min} TO {g_max}] AND color_b:[{b_min} TO {b_max}])"
-            active_filters.append(color_filter_string)
             hex_color = to_hex(query_rgb)
             st.sidebar.markdown(f"""
                 <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-family: 'Source Sans Pro', sans-serif; color: #262730;">
@@ -177,15 +176,6 @@ if uploaded_file:
                 </div>
                 """, unsafe_allow_html=True)
 
-    # 2. Build Text Filter (if text is also provided)
-    if search_query.strip():
-        search_words = search_query.strip().split()
-        # --- MODIFICATION: Simplified filter syntax (no quotes) ---
-        text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
-        active_filters.append(f"({' AND '.join(text_filters)})")
-
-    final_filter_string = " AND ".join(active_filters) if active_filters else None
-
     with st.spinner("Searching..."):
         try:
             query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
@@ -193,32 +183,40 @@ if uploaded_file:
             st.error(f"Failed to upload image: {e}")
             st.stop()
         
-        # Perform multimodal search
+        # --- MODIFICATION: Perform image search with ONLY the color filter ---
         visual_weight = 0.85
-        vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD], filter_string=final_filter_string)
-        sem_res = marqo_search(query_url, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
+        vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD], filter_string=color_filter_string)
+        sem_res = marqo_search(query_url, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=color_filter_string)
         vis_hits = vis_res.get("hits", []) if vis_res else []
         sem_hits = sem_res.get("hits", []) if sem_res else []
-        fused_img = fuse_hits(vis_hits, sem_hits, alpha=visual_weight)
+        fused_img_results = fuse_hits(vis_hits, sem_hits, alpha=visual_weight)
 
+        # --- MODIFICATION: If text is present, perform a separate, more restrictive search and fuse ---
         if search_query.strip():
             text_weight = 0.35
-            # --- MODIFICATION: Increased search limit ---
-            txt_res = marqo_search(search_query.strip(), limit=1000, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
+            
+            # Build a combined filter for the text search part
+            active_filters = []
+            if color_filter_string:
+                active_filters.append(color_filter_string)
+            search_words = search_query.strip().split()
+            text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
+            active_filters.append(f"({' AND '.join(text_filters)})")
+            text_search_filter = " AND ".join(active_filters)
+
+            txt_res = marqo_search(search_query.strip(), limit=1000, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=text_search_filter)
             txt_hits = txt_res.get("hits", []) if txt_res else []
-            final_hits = fuse_hits(fused_img, txt_hits, alpha=1.0 - text_weight)
+            final_hits = fuse_hits(fused_img_results, txt_hits, alpha=1.0 - text_weight)
         else:
-            final_hits = fused_img
+            final_hits = fused_img_results
 
 # --- Main Logic Branch: Text-Only Search ---
 elif search_query.strip():
     with st.spinner("Searching by text..."):
         search_words = search_query.strip().split()
-        # --- MODIFICATION: Simplified filter syntax (no quotes) ---
         text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
         final_filter_string = f"({' AND '.join(text_filters)})"
         
-        # --- MODIFICATION: Increased search limit ---
         txt_res = marqo_search(search_query.strip(), limit=1000, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
         final_hits = txt_res.get("hits", []) if txt_res else []
 

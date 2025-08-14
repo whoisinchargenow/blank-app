@@ -349,7 +349,13 @@ uploaded_file = st.sidebar.file_uploader(
     label_visibility="collapsed",
     help="Leidžiami formatai: JPG, JPEG, PNG, WEBP"
 )
-search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą")
+search_query = st.sidebar.text_input(
+    "🔍 Ieškoti pagal tekstą",
+    help=(
+        "Įveskite produkto pavadinimą, modelį ar apibūdinančius žodžius. "
+        "Teksto paieška susiaurina vizualiai rastus rezultatus; jei neįkelta nuotrauka – ieško tik pagal tekstą."
+    ),
+)
 
 # --- Early reset: if a NEW image is uploaded, unhide colour controls BEFORE rendering them
 is_new_upload = False
@@ -386,6 +392,10 @@ if uploaded_file:
             "Spalvos panašumo riba", 0, 150,
             st.session_state.get('color_threshold', 50), 10,
             key="color_threshold",
+            help=(
+                "Nustato, kiek artima turi būti katalogo prekės spalva jūsų nuotraukai. "
+                "Mažesnė reikšmė – griežtesnis atitikimas; didesnė – leidžia daugiau atspalvių."
+            ),
         )
 else:
     # No image uploaded: hide and turn off colour filter

@@ -196,7 +196,33 @@ def infer_type_from_text(text: str) -> Optional[str]:
     return best_type
 
 
+def canonicalize_type(t: Optional[str]) -> Optional[str]:
+    if not t:
+        return None
+    t_low = t.strip().lower()
+    if t_low in TYPE_KEYWORDS.keys():
+        return t_low
+    for canon, kws in TYPE_KEYWORDS.items():
+        if t_low in (kw.lower() for kw in kws):
+            return canon
+    return None
+
+
 def infer_type_from_hit(hit: Dict[str, Any]) -> Optional[str]:
+    # Prefer explicit field if present
+    val = hit.get(OBJECT_TYPE_FIELD)
+    if isinstance(val, str) and val:
+        return canonicalize_type(val)
+    # Otherwise infer from title/description/spec
+    title = hit.get(TITLE_FIELD, hit.get("title", ""))
+    desc = hit.get(DESCRIPTION_FIELD, "")
+    spec = hit.get(SPEC_TEXT_FIELD, "")
+    for candidate in (title, desc, spec):
+        t = infer_type_from_text(candidate)
+        t = canonicalize_type(t)
+        if t:
+            return t
+    return None
     # Prefer explicit field if present
     val = hit.get(OBJECT_TYPE_FIELD)
     if isinstance(val, str) and val:
@@ -387,9 +413,12 @@ if uploaded_file:
             # Step 1: broad image search (no filter) to infer type from TOP-K
             probe = marqo_search(query_url, limit=200)
             hits = probe.get("hits", []) if probe else []
-            inferred = infer_type_from_hits(hits, top_k=30) or ""
+            inferred_raw = infer_type_from_hits(hits, top_k=30) or ""
+            inferred = canonicalize_type(inferred_raw) or ""
             st.session_state.detected_object_type = inferred
-            st.session_state.selected_object_type = inferred or st.session_state.selected_object_type
+            # Only set selected type if it is a valid canonical option
+            if inferred in TYPE_KEYWORDS.keys():
+                st.session_state.selected_object_type = inferred
 
             # Build a filter if the index stores OBJECT_TYPE_FIELD
             filter_query = None
@@ -398,7 +427,19 @@ if uploaded_file:
                 filter_query = f'{OBJECT_TYPE_FIELD}:"{inferred}"'
 
             # Step 2: run two searches for controllable boosting: visual-only and semantic (text fields)
-            img_vis = marqo_search(query_url, limit=200, filter_string=filter_query, attrs=VISUAL_ATTRS)
+            def run_dual_search(q_url: str, flt: Optional[str]):
+                a = marqo_search(q_url, limit=200, filter_string=flt, attrs=VISUAL_ATTRS)
+                b = marqo_search(q_url, limit=200, filter_string=flt, attrs=TEXT_ATTRS)
+                return (a.get("hits", []) if a else [], b.get("hits", []) if b else [])
+
+            img_vis_hits, img_sem_hits = run_dual_search(query_url, filter_query)
+
+            # Fallback: if filtered search produced no hits, retry WITHOUT filter and post-filter
+            if not img_vis_hits and not img_sem_hits:
+                img_vis_hits, img_sem_hits = run_dual_search(query_url, None)
+                if inferred:
+                    img_vis_hits = postfilter_hits_by_type(img_vis_hits, inferred)
+                    img_sem_hits = postfilter_hits_by_type(img_sem_hits, inferred)
             img_sem = marqo_search(query_url, limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
             img_vis_hits = img_vis.get("hits", []) if img_vis else []
             img_sem_hits = img_sem.get("hits", []) if img_sem else []
@@ -427,15 +468,19 @@ if uploaded_file:
 elif search_query.strip():
     with st.spinner("Ieškoma pagal tekstą..."):
         # Text-only search (no image). Use manual type from sidebar if present.
-        filter_query = None
-        manual_t = st.session_state.selected_object_type
-        if manual_t:
-            filter_query = f'{OBJECT_TYPE_FIELD}:"{manual_t}"'
+        manual_t_raw = st.session_state.selected_object_type
+        manual_t = canonicalize_type(manual_t_raw)
+        filter_query = f'{OBJECT_TYPE_FIELD}:"{manual_t}"' if manual_t else None
+
         txt = marqo_search(search_query.strip(), limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
         hits = txt.get("hits", []) if txt else []
-        # If no hard type field, try post-filter by manual type
-        if manual_t and (not hits or OBJECT_TYPE_FIELD not in hits[0]):
+
+        # If filtered search empty, retry without filter and post-filter by manual type
+        if (not hits) and manual_t:
+            txt = marqo_search(search_query.strip(), limit=200, filter_string=None, attrs=TEXT_ATTRS)
+            hits = txt.get("hits", []) if txt else []
             hits = postfilter_hits_by_type(hits, manual_t)
+
         results_payload = {"hits": hits}
 else:
     results_payload = None

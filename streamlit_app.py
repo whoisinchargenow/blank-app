@@ -509,13 +509,17 @@ if final_hits:
         with cols[i % 5]:
             img_url = h.get(IMAGE_FIELD) or h.get(ALT_IMAGE_FIELD) or h.get("image")
             title = h.get(TITLE_FIELD, h.get('title', 'Be pavadinimo'))
+            sku = h.get(SKU_FIELD) or h.get('product_id')
             click_url = h.get(CLICK_URL_FIELD)
             dom_color_hex = h.get(DOM_COLOR_FIELD)
             score = h.get('_fused_score', h.get('_score', None))
 
             if img_url:
                 st.image(img_url, use_container_width=True)
-            st.write(f"**{title}**")
+            if sku:
+                st.write(f"**{title}** · SKU: `{sku}`")
+            else:
+                st.write(f"**{title}**")
             if isinstance(score, (int, float)):
                 st.caption(f"Panašumas: {score:.3f}")
             if click_url:

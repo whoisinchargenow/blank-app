@@ -356,6 +356,7 @@ st.caption("Sistema pirmiausia ieško vizualiai panašių produktų. Tekstas –
 # Session state
 for key, default in (
     ('last_upload_hash', None), ('search_results', None), ('query_color', None), ('base_hits', None), ('last_color_threshold', None),
+    ('color_filter_hidden', False), ('use_color_filter', True), ('color_controls_rerolled', False), ('color_threshold', 50),
     ('page', 0),
 ):
     if key not in st.session_state:
@@ -369,8 +370,14 @@ uploaded_file = st.sidebar.file_uploader(
     key="uploader"
 )
 search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą:", "")
-color_threshold = st.sidebar.slider("Spalvos panašumo riba", 0, 200, 50, 10)
-use_color_filter = st.sidebar.checkbox("Įjungti spalvos filtravimą", value=True)
+if st.session_state.get('color_filter_hidden', False):
+    # Hide color controls and force filter off
+    st.session_state['use_color_filter'] = False
+    color_threshold = st.session_state.get('color_threshold', 50)
+    use_color_filter = False
+else:
+    color_threshold = st.sidebar.slider("Spalvos panašumo riba", 0, 200, st.session_state.get('color_threshold', 50), 10, key='color_threshold')
+    use_color_filter = st.sidebar.checkbox("Įjungti spalvos filtravimą", value=st.session_state.get('use_color_filter', True), key='use_color_filter')
 
 # Boosting weights
 visual_weight = 0.85  # vizualinis signalas svarbiausias
@@ -381,6 +388,12 @@ results_payload: Optional[Dict[str, Any]] = None
 if uploaded_file:
     st.sidebar.image(uploaded_file, caption="Įkeltas paveikslėlis", width=180)
     img_bytes = uploaded_file.getvalue()
+    current_hash = hash(img_bytes)
+    if st.session_state.get('last_upload_hash') != current_hash:
+        st.session_state['last_upload_hash'] = current_hash
+        st.session_state['color_filter_hidden'] = False
+        st.session_state['color_controls_rerolled'] = False
+        st.session_state['use_color_filter'] = True
     try:
         query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
     except Exception as e:
@@ -408,6 +421,10 @@ if uploaded_file:
 
 elif search_query.strip():
     with st.spinner("Ieškoma pagal tekstą..."):
+        # Reset color filter hiding for a fresh text-only search
+        st.session_state['color_filter_hidden'] = False
+        st.session_state['color_controls_rerolled'] = False
+        st.session_state['use_color_filter'] = True
         txt_res = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
         txt_hits = txt_res.get("hits", []) if txt_res else []
         st.session_state.base_hits = txt_hits
@@ -454,8 +471,18 @@ if base_list:
         else:
             if unknowns:
                 st.info("Dauguma įrašų neturi spalvos indekse — rodau be spalvų filtro.")
+            st.session_state['color_filter_hidden'] = True
+            st.session_state['use_color_filter'] = False
+            if not st.session_state.get('color_controls_rerolled', False):
+                st.session_state['color_controls_rerolled'] = True
+                st.rerun()
             else:
                 st.info("Spalvos filtras pašalino visus rezultatus — rodau be spalvų filtro.")
+            st.session_state['color_filter_hidden'] = True
+            st.session_state['use_color_filter'] = False
+            if not st.session_state.get('color_controls_rerolled', False):
+                st.session_state['color_controls_rerolled'] = True
+                st.rerun()
             hits = original_hits
 
     # Final sort by fused/score

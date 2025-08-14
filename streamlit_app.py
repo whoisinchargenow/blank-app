@@ -239,8 +239,8 @@ def marqo_search(q: str, limit: int = 200, attrs: Optional[List[str]] = None, me
         return resp.json()
     except requests.exceptions.RequestException as e:
         msg = e.response.text if getattr(e, "response", None) is not None else str(e)
-        st.error("API search error")
-        with st.expander("📄 Server response"):
+        st.error("API paieškos klaida")
+        with st.expander("📄 Serverio atsakymas"):
             st.code(msg, language="json")
         return None
 
@@ -325,9 +325,9 @@ def render_pagination(total_pages: int, current_page_zerobased: int):
 # UI and Application Flow
 # =============================================================
 
-st.set_page_config(page_title="Furniture Search", layout="wide")
-st.title("🛋️ Furniture and Interior Element Search")
-st.caption("The system prioritises visually similar products. Text is an optional signal.")
+st.set_page_config(page_title="Baldų paieška", layout="wide")
+st.title("🛋️ Baldų ir interjero elementų paieška")
+st.caption("Sistema pirmiausia ieško vizualiai panašių produktų. Tekstas – papildomas signalas.")
 
 # Session state defaults
 for k, v in (
@@ -340,9 +340,9 @@ for k, v in (
         st.session_state[k] = v
 
 # Sidebar
-st.sidebar.header("Search Settings")
-uploaded_file = st.sidebar.file_uploader("Choose an image", type=["jpg", "jpeg", "png", "webp"])
-search_query = st.sidebar.text_input("🔍 Search by text")
+st.sidebar.header("Paieškos nustatymai")
+uploaded_file = st.sidebar.file_uploader("Pasirinkite paveikslėlį", type=["jpg", "jpeg", "png", "webp"])
+search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą")
 
 # --- Early reset: if a NEW image is uploaded, unhide colour controls BEFORE rendering them
 is_new_upload = False
@@ -371,12 +371,12 @@ if uploaded_file:
         if is_new_upload:
             st.session_state['color_filter_checked'] = True
         use_color_filter = st.sidebar.checkbox(
-            "Enable color filtering",
+            "Įjungti spalvų filtravimą",
             value=st.session_state.get('color_filter_checked', True),
             key="color_filter_checked",
         )
         color_threshold = st.sidebar.slider(
-            "Color similarity threshold", 0, 150,
+            "Spalvos panašumo riba", 0, 150,
             st.session_state.get('color_threshold', 50), 10,
             key="color_threshold",
         )
@@ -389,7 +389,7 @@ final_hits: List[Dict[str, Any]] = []
 
 # --- Main Logic Branch: Image Search (+ optional text) ---
 if uploaded_file:
-    st.sidebar.image(uploaded_file, caption="Uploaded Image", width=180)
+    st.sidebar.image(uploaded_file, caption="Įkeltas paveikslėlis", width=180)
     img_bytes = uploaded_file.getvalue()
     current_hash = hash(img_bytes)
 
@@ -401,11 +401,11 @@ if uploaded_file:
 
     query_rgb = get_dominant_color(img_bytes) if use_color_filter else None
 
-    with st.spinner("Searching visually similar items..."):
+    with st.spinner("Ieškoma vizualiai panašių elementų..."):
         try:
             query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
         except Exception as e:
-            st.error(f"Failed to upload image: {e}")
+            st.error(f"Nepavyko įkelti paveikslėlio: {e}")
             st.stop()
 
         # Visual-only and text-fields tensor searches (no server-side colour filter)
@@ -451,7 +451,7 @@ elif search_query.strip():
     st.session_state.color_filter_hidden = True
     st.session_state.color_controls_rerolled = False
 
-    with st.spinner("Searching by text..."):
+    with st.spinner("Ieškoma pagal tekstą..."):
         txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="LEXICAL")
         final_hits = txt_res.get("hits", []) if txt_res else []
 
@@ -459,7 +459,7 @@ elif search_query.strip():
 else:
     # Initial state: no image — hide colour controls
     st.session_state.color_filter_hidden = True
-    st.info("Please upload an image or enter a search query to begin.")
+    st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę.")
 
 # =============================================================
 # Render Results
@@ -471,7 +471,7 @@ if final_hits:
         st.session_state.page = 0
     st.session_state.last_hit_count = len(final_hits)
 
-    st.subheader(f"Found {len(final_hits)} results")
+    st.subheader(f"Rasta rezultatų: {len(final_hits)}")
     page_size = 50  # 5 per row × 10 rows per page
     total_pages = (len(final_hits) - 1) // page_size + 1
     current_page = st.session_state.page
@@ -486,7 +486,7 @@ if final_hits:
     for i, h in enumerate(page_hits):
         with cols[i % 5]:
             img_url = h.get(IMAGE_FIELD) or h.get(ALT_IMAGE_FIELD) or h.get("image")
-            title = h.get(TITLE_FIELD, h.get('title', 'No title'))
+            title = h.get(TITLE_FIELD, h.get('title', 'Be pavadinimo'))
             click_url = h.get(CLICK_URL_FIELD)
             dom_color_hex = h.get(DOM_COLOR_FIELD)
             score = h.get('_fused_score', h.get('_score', None))
@@ -495,9 +495,9 @@ if final_hits:
                 st.image(img_url, use_container_width=True)
             st.write(f"**{title}**")
             if isinstance(score, (int, float)):
-                st.caption(f"Similarity: {score:.3f}")
+                st.caption(f"Panašumas: {score:.3f}")
             if click_url:
-                st.markdown(f"[🔗 Open Product]({click_url})")
+                st.markdown(f"[🔗 Atidaryti produktą]({click_url})")
             if isinstance(dom_color_hex, str) and len(dom_color_hex) >= 4:
                 st.markdown(
                     f'<div style="display:flex;align-items:center;gap:8px">'
@@ -508,4 +508,4 @@ if final_hits:
             st.markdown('---')
 
 elif uploaded_file or search_query:
-    st.warning("No results found. Try adjusting your query or the filter settings.")
+    st.warning("Rezultatų nerasta. Pabandykite pakoreguoti užklausą ar filtrus.")

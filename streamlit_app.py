@@ -298,7 +298,7 @@ def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], al
 
 st.set_page_config(page_title="Baldų paieška", layout="wide")
 st.title("🛋️ Baldų ir interjero elementų paieška")
-st.caption("Sistema pirmiausia ieško vizualiai panašių produktų. Tekstas – papildomas signalas.").")
+st.caption("Sistema pirmiausia ieško vizualiai panašių produktų. Tekstas – papildomas signalas.")
 
 # Session state
 for key, default in (
@@ -319,28 +319,50 @@ search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą:", "")
 color_threshold = st.sidebar.slider("Spalvos panašumo riba", 0, 200, 50, 10)
 use_color_filter = st.sidebar.checkbox("Įjungti spalvos filtravimą", value=True)
 
-# Boosting sliders
-visual_weight = 0.75  # fixed visual weight (removed UI slider)
-text_weight = None
-if search_query.strip():
-                txt_res = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
-                txt_hits = txt_res.get("hits", []) if txt_res else []
-                gamma = text_weight if text_weight is not None else 0.35
-                final_hits = fuse_hits(fused_img, txt_hits, alpha=1.0 - gamma)
-                st.session_state.base_hits = final_hits
-                results_payload = {"hits": final_hits}
-            else:
-                st.session_state.base_hits = fused_img
-                results_payload = {"hits": fused_img}
+# Boosting weights
+visual_weight = 0.85  # vizualinis signalas svarbiausias
+text_weight = 0.35 if search_query.strip() else 0.0
+
+results_payload: Optional[Dict[str, Any]] = None
+
+if uploaded_file:
+    st.sidebar.image(uploaded_file, caption="Įkeltas paveikslėlis", width=180)
+    img_bytes = uploaded_file.getvalue()
+    try:
+        query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
+    except Exception as e:
+        st.error(f"Nepavyko įkelti į R2: {e}")
+        st.stop()
+
+    st.session_state.query_color = get_dominant_color(img_bytes)
+
+    with st.spinner("Ieškoma vizualiai panašių elementų..."):
+        vis_res = marqo_search(query_url, limit=200, attrs=VISUAL_ATTRS)
+        sem_res = marqo_search(query_url, limit=200, attrs=TEXT_ATTRS)
+        vis_hits = vis_res.get("hits", []) if vis_res else []
+        sem_hits = sem_res.get("hits", []) if sem_res else []
+        fused_img = fuse_hits(vis_hits, sem_hits, alpha=visual_weight)
+
+        if search_query.strip():
+            txt_res = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
+            txt_hits = txt_res.get("hits", []) if txt_res else []
+            final_hits = fuse_hits(fused_img, txt_hits, alpha=1.0 - text_weight) if text_weight > 0 else fused_img
+        else:
+            final_hits = fused_img
+
+        st.session_state.base_hits = final_hits
+        results_payload = {"hits": final_hits}
 
 elif search_query.strip():
     with st.spinner("Ieškoma pagal tekstą..."):
-        txt = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
-        hits = txt.get("hits", []) if txt else []
-        st.session_state.base_hits = hits
-        results_payload = {"hits": hits}
+        txt_res = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
+        txt_hits = txt_res.get("hits", []) if txt_res else []
+        st.session_state.base_hits = txt_hits
+        results_payload = {"hits": txt_hits}
 else:
     results_payload = None
+    st.session_state.base_hits = None
+    st.session_state.query_color = None
     st.session_state.page = 0
 
 # =============================================================
@@ -349,7 +371,7 @@ else:
 
 base_list = results_payload.get("hits") if results_payload else st.session_state.get("base_hits")
 if base_list:
-    hits = list(base_list)  # copy
+    hits = list(base_list)
 
     # Optional color filter (applies mainly to image queries)
     if uploaded_file and use_color_filter and st.session_state.query_color is not None:
@@ -366,7 +388,7 @@ if base_list:
         for h in hits:
             hx = h.get(DOM_COLOR_FIELD)
             if not _is_valid_hex(hx):
-                unknowns.append(h)  # no color in index → don't over-filter
+                unknowns.append(h)
                 continue
             h_rgb = hex_to_rgb(hx)
             dist = color_distance(qcol, h_rgb)
@@ -375,18 +397,13 @@ if base_list:
                 matches.append(h)
 
         if matches:
-            hits = matches
-            # keep unknowns only if there are very few matches
-            if len(matches) < 5:
-                hits.extend(unknowns)
+            hits = matches + (unknowns if len(matches) < 5 else [])
         else:
-            # No color matches; if we have unknowns, show them instead of empty
             if unknowns:
                 st.info("Dauguma įrašų neturi spalvos indekse — rodau be spalvų filtro.")
-                hits = original_hits  # fall back to unfiltered
             else:
                 st.info("Spalvos filtras pašalino visus rezultatus — rodau be spalvų filtro.")
-                hits = original_hits
+            hits = original_hits
 
     # Final sort by fused/score
     hits.sort(key=lambda h: h.get('_adj_score', h.get('_fused_score', h.get('_score', 0.0))), reverse=True)
@@ -398,7 +415,32 @@ if base_list:
 
     st.subheader(f"Rasta rezultatų: {len(hits)}")
 
-                if img_url:
+    col_prev, col_pg, col_next = st.columns([2, 8, 2])
+    with col_prev:
+        if st.button("⬅ Ankstesnis", disabled=(current_page == 0)):
+            st.session_state.page -= 1
+            st.rerun()
+    with col_pg:
+        st.markdown(f"<div style='text-align:center;'>Puslapis {current_page + 1} iš {total_pages}</div>", unsafe_allow_html=True)
+    with col_next:
+        if st.button("Kitas ➡", disabled=(current_page >= total_pages - 1)):
+            st.session_state.page += 1
+            st.rerun()
+
+    start = current_page * page_size
+    end = start + page_size
+    page_hits = hits[start:end]
+
+    cols = st.columns(3)
+    for i, h in enumerate(page_hits):
+        with cols[i % 3]:
+            img_url = h.get(IMAGE_FIELD) or h.get(ALT_IMAGE_FIELD) or h.get("image")
+            title = h.get(TITLE_FIELD, h.get('title', 'Be pavadinimo'))
+            _id = h.get('_id', 'Nėra')
+            score = h.get('_fused_score', h.get('_score', None))
+            click_url = h.get(CLICK_URL_FIELD)
+
+            if img_url:
                 st.image(img_url, use_container_width=True)
             st.write(f"**{title}**")
             st.caption(f"ID: {_id}")
@@ -406,9 +448,9 @@ if base_list:
                 st.caption(f"Panašumas: {score:.3f}")
             if isinstance(click_url, str) and click_url:
                 st.markdown(f"[🔗 Atidaryti produktą]({click_url})")
-            st.markdown("---")
+            st.markdown('---')
 
 elif results_payload is not None:
-    st.info("Rezultatų nerasta. Pabandykite kitą nuotrauką, pakeiskite tipą arba atlaisvinkite filtrus.")
+    st.info("Rezultatų nerasta. Pabandykite kitą paveikslėlį arba įvesti paieškos frazę.")
 else:
     st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę.")

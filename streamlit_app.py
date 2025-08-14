@@ -97,6 +97,29 @@ TYPE_KEYWORDS = {
 TEXT_ATTRS = [TITLE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD, SEARCH_BLOB_FIELD]
 VISUAL_ATTRS = [IMAGE_FIELD]
 
+# Tensor fields available in the current index (keep in sync with your indexer)
+KNOWN_TENSOR_FIELDS = {"name", "description", "image", "spec_text", "search_blob"}
+
+
+def sanitize_attrs(attrs: List[str]) -> List[str]:
+    """Map aliases (e.g., 'title' -> 'name'), drop unknowns, ensure non-empty.
+    This prevents Marqo from rejecting the request when an invalid tensor field is sent.
+    """
+    out: List[str] = []
+    for a in attrs:
+        a = (a or "").strip()
+        if not a:
+            continue
+        # Map common alias
+        if a == "title":
+            a = "name"
+        if a in KNOWN_TENSOR_FIELDS and a not in out:
+            out.append(a)
+    if not out:
+        # last resort: use image only
+        out = ["image"] if "image" in KNOWN_TENSOR_FIELDS else list(KNOWN_TENSOR_FIELDS)
+    return out
+
 # =============================================================
 # R2 helpers (upload the query image)
 # =============================================================
@@ -228,13 +251,13 @@ def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, 
     Performs a tensor search on Marqo.
     q can be a text phrase or an image URL accessible to Marqo.
     """
-    searchable_attributes = attrs or [
+    searchable_attributes = sanitize_attrs(attrs or [
         IMAGE_FIELD,
         TITLE_FIELD,
         DESCRIPTION_FIELD,
         SPEC_TEXT_FIELD,
         SEARCH_BLOB_FIELD,
-    ]
+    ])
 
     payload: Dict[str, Any] = {
         "limit": limit,

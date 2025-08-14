@@ -199,22 +199,70 @@ def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
 # =============================================================
 
 def get_dominant_color(image_bytes: bytes) -> np.ndarray:
+    """Return approximate dominant color of the *object*, not the background.
+    Heuristics:
+      - center-weighted sampling (object is usually centered)
+      - drop very low-saturation (gray/white) and extreme value pixels
+      - KMeans on the remaining pixels (k=3) and pick the most salient cluster
+    Returns RGB as ints [0..255].
+    """
     try:
-        img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-        img = img.resize((50, 50))
-        data = np.array(img).reshape(-1, 3)
+        # Load & resize for speed/consistency
+        img = Image.open(io.BytesIO(image_bytes)).convert('RGB').resize((160, 160))
+        rgb = np.asarray(img, dtype=np.float32) / 255.0  # (H,W,3)
+        # HSV for saturation/value masks
+        hsv = np.asarray(img.convert('HSV'), dtype=np.float32)
+        h, s, v = hsv[..., 0] / 255.0, hsv[..., 1] / 255.0, hsv[..., 2] / 255.0
 
-        def is_background(px):
-            return np.all(px > 240) or np.all(px < 15)
-        filtered = np.array([px for px in data if not is_background(px)])
-        if filtered.size == 0:
-            filtered = data
-        kmeans = KMeans(n_clusters=1, n_init=10)
-        kmeans.fit(filtered)
-        return kmeans.cluster_centers_[0].astype(int)
-    except Exception as e:
-        st.warning(f"Nepavyko nustatyti spalvos: {e}")
-        return np.array([0, 0, 0])
+        H, W = s.shape
+        yy, xx = np.mgrid[0:H, 0:W]
+        cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
+        # Gaussian center mask (sigma ~ 0.45 of half-diagonal)
+        rx = (xx - cx) / (0.45 * W)
+        ry = (yy - cy) / (0.45 * H)
+        center_w = np.exp(-(rx * rx + ry * ry))
+
+        # Keep reasonably saturated, not too bright/dark pixels
+        mask = (s >= 0.22) & (v >= 0.10) & (v <= 0.95)
+        # Weight by center & saturation to emphasize object areas
+        weights = center_w * (0.3 + 0.7 * s)
+        weights = np.where(mask, weights, 0.0)
+
+        # Select top-weighted pixels (avoid bias by taking the top 25%)
+        flat_w = weights.reshape(-1)
+        if flat_w.max() <= 0:
+            raise ValueError("no salient pixels")
+        thresh = np.quantile(flat_w[flat_w > 0], 0.75)
+        pick = flat_w >= max(thresh, 1e-6)
+        samples = rgb.reshape(-1, 3)[pick]
+        if samples.shape[0] < 300:
+            # fallback: relax threshold
+            pick = flat_w > 0
+            samples = rgb.reshape(-1, 3)[pick]
+        if samples.shape[0] == 0:
+            raise ValueError("no samples")
+
+        # KMeans over selected pixels
+        km = KMeans(n_clusters=3, n_init=10, random_state=0)
+        km.fit(samples)
+        labels = km.labels_
+        centers = km.cluster_centers_
+
+        # Score clusters: size * (mean saturation + epsilon)
+        scores = []
+        for k in range(centers.shape[0]):
+            idx = (labels == k)
+            if not np.any(idx):
+                scores.append(-1)
+                continue
+            mean_rgb = samples[idx].mean(axis=0)
+            # recompute saturation on cluster mean
+            r, g, b = mean_rgb
+            # approximate saturation from RGB
+            mx, mn = float(np.max(mean_rgb)), float(np.min(mean_rgb))
+            sat = 0.0 if mx == 0 else (mx - mn) / mx
+            scores.append(idx.mean() * (sat + 0.05))
+        best
 
 
 def hex_to_rgb(hex_color: str) -> np.ndarray:

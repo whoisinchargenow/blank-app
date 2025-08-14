@@ -449,6 +449,21 @@ search_query = st.sidebar.text_input(
     ),
 )
 
+# Tekstinės paieškos atveju rodyti spalvų parinkiklį
+text_use_color_picker = False
+text_picker_hex: Optional[str] = None
+if not uploaded_file:
+    text_use_color_picker = st.sidebar.checkbox(
+        "Filtruoti pagal pasirinktą spalvą",
+        value=False,
+        help="Jei įjungta, rezultatai bus filtruojami pagal žemiau pasirinktą spalvą.",
+    )
+    text_picker_hex = st.sidebar.color_picker(
+        "🎨 Pasirinkite spalvą",
+        value="#d9bc92",
+        help="Taikoma tik tekstinei paieškai. Parinkta spalva naudojama atrinkti vizualiai panašius atspalvius.",
+    )
+
 # --- Early reset: if a NEW image is uploaded, unhide colour controls BEFORE rendering them
 is_new_upload = False
 if uploaded_file:
@@ -566,11 +581,17 @@ elif search_query.strip():
 
     with st.spinner("Ieškoma pagal tekstą..."):
         color_rgb_text, rest_text = parse_color_from_text(search_query)
+        # Jei naudotojas pasirinko spalvą parinkiklyje – ji turi pirmenybę
+        if text_use_color_picker and isinstance(text_picker_hex, str):
+            _picked = hex_to_rgb(text_picker_hex)
+            if _picked is not None:
+                color_rgb_text = _picked
+
         qtext = (rest_text.strip() if rest_text else "baldai")  # neutral fallback to fetch a broad set
         txt_res = marqo_search(q=qtext, limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
         final_hits = txt_res.get("hits", []) if txt_res else []
 
-        # Apply colour filter from text, if any
+        # Apply colour filter (from text or picker), if any
         if color_rgb_text is not None and final_hits:
             threshold = float(st.session_state.get('color_threshold', 60))
             kept, unknowns = [], []

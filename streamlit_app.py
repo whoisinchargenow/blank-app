@@ -347,7 +347,12 @@ uploaded_file = st.sidebar.file_uploader(
     "Įkelkite paveikslėlį",
     type=["jpg", "jpeg", "png", "webp"],
     label_visibility="collapsed",
-    help="Leidžiami formatai: JPG, JPEG, PNG, WEBP"
+    help=(
+        "Nuotrauka naudojama vizualinei paieškai — surandami vaizdu panašūs produktai. "
+        "Jei įvesite tekstą, jis dar labiau susiaurins rezultatus (pvz., modelis ar medžiaga). "
+        "Įjungus spalvų filtrą, rezultatai papildomai filtruojami pagal objekto spalvą jūsų nuotraukoje. "
+        "Leidžiami formatai: JPG, JPEG, PNG, WEBP."
+    ),
 )
 search_query = st.sidebar.text_input(
     "🔍 Ieškoti pagal tekstą",

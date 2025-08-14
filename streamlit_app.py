@@ -393,7 +393,7 @@ if uploaded_file:
         st.session_state['last_upload_hash'] = current_hash
         st.session_state['color_filter_hidden'] = False
         st.session_state['color_controls_rerolled'] = False
-        st.session_state['use_color_filter'] = True
+        # (removed) avoid setting widget state mid-run to prevent StreamlitAPIException
     try:
         query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
     except Exception as e:
@@ -424,7 +424,7 @@ elif search_query.strip():
         # Reset color filter hiding for a fresh text-only search
         st.session_state['color_filter_hidden'] = False
         st.session_state['color_controls_rerolled'] = False
-        st.session_state['use_color_filter'] = True
+        # (removed) avoid setting widget state mid-run to prevent StreamlitAPIException
         txt_res = marqo_search(search_query.strip(), limit=200, attrs=TEXT_ATTRS)
         txt_hits = txt_res.get("hits", []) if txt_res else []
         st.session_state.base_hits = txt_hits
@@ -472,14 +472,14 @@ if base_list:
             if unknowns:
                 st.info("Dauguma įrašų neturi spalvos indekse — rodau be spalvų filtro.")
             st.session_state['color_filter_hidden'] = True
-            st.session_state['use_color_filter'] = False
+            # avoid writing to widget state mid-run
             if not st.session_state.get('color_controls_rerolled', False):
                 st.session_state['color_controls_rerolled'] = True
                 st.rerun()
             else:
                 st.info("Spalvos filtras pašalino visus rezultatus — rodau be spalvų filtro.")
             st.session_state['color_filter_hidden'] = True
-            st.session_state['use_color_filter'] = False
+            # avoid writing to widget state mid-run
             if not st.session_state.get('color_controls_rerolled', False):
                 st.session_state['color_controls_rerolled'] = True
                 st.rerun()

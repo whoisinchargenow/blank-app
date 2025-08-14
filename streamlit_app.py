@@ -441,12 +441,9 @@ if uploaded_file:
             # Keep unknowns if very few matches to avoid over-pruning
             final_hits = kept + (unknowns if len(kept) < 5 else [])
         else:
-            # Hide colour controls until a new image or search
+            # No colour matches: don't hide controls; just show info and fall back
             st.info("Dauguma įrašų neturi spalvos indekse — rodau be spalvų filtro.")
-            st.session_state.color_filter_hidden = True
-            if not st.session_state.color_controls_rerolled:
-                st.session_state.color_controls_rerolled = True
-                st.rerun()
+            final_hits = image_search_results
 
 # --- Main Logic Branch: Text-Only Search ---
 elif search_query.strip():

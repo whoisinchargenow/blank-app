@@ -146,10 +146,6 @@ TYPE_KEYWORDS = {
 TEXT_ATTRS = [TITLE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD, SEARCH_BLOB_FIELD]
 VISUAL_ATTRS = [IMAGE_FIELD]
 
-# Search attribute sets for dual-search fusion
-TEXT_ATTRS = [TITLE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD, SEARCH_BLOB_FIELD]
-VISUAL_ATTRS = [IMAGE_FIELD]
-
 # Tensor fields available in the current index (keep in sync with your indexer)
 KNOWN_TENSOR_FIELDS = {"name", "description", "image", "spec_text", "search_blob"}
 
@@ -382,7 +378,7 @@ st.caption("Įkelkite produkto nuotrauką arba įveskite raktažodžius. Sistema
 
 # Session state
 for key, default in (
-    ('last_upload_hash', None), ('search_results', None), ('query_color', None),
+    ('last_upload_hash', None), ('search_results', None), ('query_color', None), ('base_hits', None), ('last_color_threshold', None), ('last_selected_type', None),
     ('page', 0), ('detected_object_type', None), ('selected_object_type', None),
 ):
     if key not in st.session_state:
@@ -408,6 +404,16 @@ if search_query.strip():
         help="Kiek pridėti vartotojo teksto paiešką prie rezultato (sujungiama su vaizdo paieška)."
     )
 
+# Product type manual selector
+_type_choices = ['(automatiškai)'] + sorted(TYPE_KEYWORDS.keys())
+_current_sel = st.session_state.get('selected_object_type')
+try:
+    _default_idx = _type_choices.index(_current_sel) if _current_sel in _type_choices else 0
+except Exception:
+    _default_idx = 0
+_selected_label = st.sidebar.selectbox("Produkto tipas (pasirinktinai)", options=_type_choices, index=_default_idx)
+_manual_type = None if _selected_label == '(automatiškai)' else _selected_label
+st.session_state.selected_object_type = _manual_type
 
 # -----------------------------
 # Main logic
@@ -420,9 +426,11 @@ if uploaded_file:
     img_bytes = uploaded_file.getvalue()
     current_hash = hash(img_bytes)
 
-    if current_hash != st.session_state.last_upload_hash:
+    recompute_needed = (current_hash != st.session_state.last_upload_hash) or (st.session_state.get('last_selected_type') != st.session_state.get('selected_object_type'))
+    if recompute_needed:
         st.session_state.last_upload_hash = current_hash
         st.session_state.page = 0
+        st.session_state.last_selected_type = st.session_state.get('selected_object_type')
 
         # Upload query image to R2 for a stable, public URL
         try:
@@ -446,10 +454,10 @@ if uploaded_file:
                 st.session_state.selected_object_type = inferred
 
             # Build a filter if the index stores OBJECT_TYPE_FIELD
+            effective_type = st.session_state.get('selected_object_type') or inferred
             filter_query = None
-            if inferred:
-                # Try hard filter first (requires OBJECT_TYPE_FIELD in index)
-                filter_query = f'{OBJECT_TYPE_FIELD}:"{inferred}"'
+            if effective_type:
+                filter_query = f'{OBJECT_TYPE_FIELD}:"{effective_type}"'
 
             # Step 2: run two searches for controllable boosting: visual-only and semantic (text fields)
             def run_dual_search(q_url: str, flt: Optional[str]):
@@ -467,19 +475,14 @@ if uploaded_file:
                     img_sem_hits = postfilter_hits_by_type(img_sem_hits, inferred)
             
             # If OBJECT_TYPE is missing from index, post-filter by keywords but don't over-filter
-            if inferred:
+            if effective_type:
                 def safe_postfilter(lst):
-                    fl = postfilter_hits_by_type(lst, inferred)
+                    fl = postfilter_hits_by_type(lst, effective_type)
                     return fl if fl else lst  # keep originals if filtering removes everything
                 if not img_vis_hits or (img_vis_hits and OBJECT_TYPE_FIELD not in img_vis_hits[0]):
                     img_vis_hits = safe_postfilter(img_vis_hits)
                 if not img_sem_hits or (img_sem_hits and OBJECT_TYPE_FIELD not in img_sem_hits[0]):
                     img_sem_hits = safe_postfilter(img_sem_hits)
-            if inferred:
-                if not img_vis_hits or (img_vis_hits and OBJECT_TYPE_FIELD not in img_vis_hits[0]):
-                    img_vis_hits = postfilter_hits_by_type(img_vis_hits, inferred)
-                if not img_sem_hits or (img_sem_hits and OBJECT_TYPE_FIELD not in img_sem_hits[0]):
-                    img_sem_hits = postfilter_hits_by_type(img_sem_hits, inferred)
 
             # Fuse the two lists with adjustable visual weight
             fused_img = fuse_hits(img_vis_hits, img_sem_hits, alpha=visual_weight)
@@ -491,8 +494,11 @@ if uploaded_file:
                 if inferred and (not txt_hits or (txt_hits and OBJECT_TYPE_FIELD not in txt_hits[0])):
                     txt_hits = postfilter_hits_by_type(txt_hits, inferred)
                 gamma = text_weight if text_weight is not None else 0.35
-                results_payload = {"hits": fuse_hits(fused_img, txt_hits, alpha=1.0 - gamma)}
+                final_hits = fuse_hits(fused_img, txt_hits, alpha=1.0 - gamma)
+                st.session_state.base_hits = final_hits
+                results_payload = {"hits": final_hits}
             else:
+                st.session_state.base_hits = fused_img
                 results_payload = {"hits": fused_img}
 
 elif search_query.strip():
@@ -511,6 +517,7 @@ elif search_query.strip():
             hits = txt.get("hits", []) if txt else []
             hits = postfilter_hits_by_type(hits, manual_t)
 
+        st.session_state.base_hits = hits
         results_payload = {"hits": hits}
 else:
     results_payload = None
@@ -520,8 +527,9 @@ else:
 # Render results
 # =============================================================
 
-if results_payload and results_payload.get("hits"):
-    hits = list(results_payload["hits"])  # copy
+base_list = results_payload.get("hits") if results_payload else st.session_state.get("base_hits")
+if base_list:
+    hits = list(base_list)  # copy
 
     # Optional color filter (applies mainly to image queries)
     if uploaded_file and use_color_filter and st.session_state.query_color is not None:

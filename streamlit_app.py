@@ -22,7 +22,7 @@ import boto3
 
 def _cfg(key: str, default: Optional[str] = None) -> Optional[str]:
     try:
-        return st.secrets[key]  # type: ignore[attr-defined]
+        return st.secrets[key]
     except Exception:
         return os.getenv(key, default)
 
@@ -62,6 +62,7 @@ KNOWN_TENSOR_FIELDS = {"name", "description", "image", "spec_text", "search_blob
 # =============================================================
 
 def to_hex(rgb) -> str:
+    """Converts an RGB tuple or list to a hex string."""
     r, g, b = [int(max(0, min(255, v))) for v in rgb]
     return f"#{r:02x}{g:02x}{b:02x}"
 
@@ -81,11 +82,13 @@ def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
     except Exception:
         return None
 
-def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+# --- MODIFIED: marqo_search now accepts a search method ---
+def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None, method: str = "TENSOR") -> Optional[Dict[str, Any]]:
+    """Performs a search on Marqo, allowing method to be 'TENSOR' or 'LEXICAL'."""
     payload: Dict[str, Any] = {
-        "limit": limit, "q": q, "searchMethod": "TENSOR",
+        "limit": limit, "q": q, "searchMethod": method,
         "searchableAttributes": attrs or [IMAGE_FIELD, TITLE_FIELD, SEARCH_BLOB_FIELD],
-        "attributesToRetrieve": ["_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD, SKU_FIELD, CLICK_URL_FIELD]
+        "attributesToRetrieve": ["_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD, SKU_FIELD, CLICK_URL_FIELD, "_score"]
     }
     if filter_string: payload["filter"] = filter_string
     url = f"{MARQO_URL}/indexes/{INDEX_NAME}/search"
@@ -123,44 +126,25 @@ def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
 
 def render_pagination(total_pages: int, current_page_zerobased: int):
     """Renders the advanced pagination component."""
-    if total_pages <= 1:
-        return
-
-    # Settings
+    if total_pages <= 1: return
     max_pages_to_show = 10
-    
-    # Create a container for the pagination controls
     nav = st.container()
     cols = nav.columns([1, 1, *(2 for _ in range(max_pages_to_show)), 1, 1])
+    def set_page(page_num): st.session_state.page = page_num
     
-    # --- Helper to set page and rerun ---
-    def set_page(page_num):
-        st.session_state.page = page_num
-    
-    # --- First and Previous Buttons ---
     is_first_page = current_page_zerobased == 0
     cols[0].button("«", on_click=set_page, args=[0], disabled=is_first_page, use_container_width=True)
     cols[1].button("‹", on_click=set_page, args=[current_page_zerobased - 1], disabled=is_first_page, use_container_width=True)
 
-    # --- Page Number Buttons ---
     half_window = max_pages_to_show // 2
     start_page = max(0, current_page_zerobased - half_window)
     end_page = min(total_pages, start_page + max_pages_to_show)
-    if end_page - start_page < max_pages_to_show:
-        start_page = max(0, end_page - max_pages_to_show)
+    if end_page - start_page < max_pages_to_show: start_page = max(0, end_page - max_pages_to_show)
     
     for i, page_num in enumerate(range(start_page, end_page)):
         is_current = page_num == current_page_zerobased
-        cols[i+2].button(
-            f"{page_num + 1}",
-            on_click=set_page,
-            args=[page_num],
-            disabled=is_current,
-            type="primary" if is_current else "secondary",
-            use_container_width=True
-        )
+        cols[i+2].button(f"{page_num + 1}", on_click=set_page, args=[page_num], disabled=is_current, type="primary" if is_current else "secondary", use_container_width=True)
 
-    # --- Next and Last Buttons ---
     is_last_page = current_page_zerobased == total_pages - 1
     cols[-2].button("›", on_click=set_page, args=[current_page_zerobased + 1], disabled=is_last_page, use_container_width=True)
     cols[-1].button("»", on_click=set_page, args=[total_pages - 1], disabled=is_last_page, use_container_width=True)
@@ -172,9 +156,7 @@ def render_pagination(total_pages: int, current_page_zerobased: int):
 st.set_page_config(page_title="Furniture Search", layout="wide")
 st.title("🛋️ Furniture and Interior Element Search")
 
-# --- Session state and Sidebar Base ---
-if 'page' not in st.session_state:
-    st.session_state.page = 0
+if 'page' not in st.session_state: st.session_state.page = 0
 st.sidebar.header("Search Settings")
 uploaded_file = st.sidebar.file_uploader("Choose an image", type=["jpg", "jpeg", "png", "webp"])
 search_query = st.sidebar.text_input("🔍 Search by text")
@@ -214,14 +196,15 @@ if uploaded_file:
         image_search_results = fuse_hits(vis_res.get("hits", []), sem_res.get("hits", []))
 
         if search_query.strip():
-            search_words = search_query.strip().split()
-            text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
-            text_filter_string = f"({' AND '.join(text_filters)})"
-            
-            # --- FIX: Use max search limit of 1000, not 5000 ---
-            txt_res = marqo_search(search_query.strip(), limit=1000, attrs=[TITLE_FIELD], filter_string=text_filter_string)
+            # --- MODIFICATION: Use LEXICAL search to get a reliable list of text matches ---
+            txt_res = marqo_search(
+                q=search_query.strip(),
+                limit=1000,
+                attrs=[TITLE_FIELD],
+                method="LEXICAL"  # Use keyword search for this step
+            )
             text_search_hits = txt_res.get("hits", []) if txt_res else []
-
+            
             image_result_ids = {hit['_id'] for hit in image_search_results}
             text_result_ids = {hit['_id'] for hit in text_search_hits}
             common_ids = image_result_ids.intersection(text_result_ids)
@@ -232,11 +215,13 @@ if uploaded_file:
 # --- Main Logic Branch: Text-Only Search ---
 elif search_query.strip():
     with st.spinner("Searching by text..."):
-        search_words = search_query.strip().split()
-        text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
-        final_filter_string = f"({' AND '.join(text_filters)})"
-        
-        txt_res = marqo_search(search_query.strip(), limit=1000, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
+        # --- MODIFICATION: Use LEXICAL search for reliable keyword matching ---
+        txt_res = marqo_search(
+            q=search_query.strip(),
+            limit=1000,
+            attrs=[TITLE_FIELD],
+            method="LEXICAL"
+        )
         final_hits = txt_res.get("hits", []) if txt_res else []
 
 # --- Initial State ---
@@ -248,7 +233,6 @@ else:
 # =============================================================
 
 if final_hits:
-    # Reset page to 0 if the number of results changes to avoid being on an empty page
     if "last_hit_count" not in st.session_state or st.session_state.last_hit_count != len(final_hits):
         st.session_state.page = 0
     st.session_state.last_hit_count = len(final_hits)
@@ -257,8 +241,7 @@ if final_hits:
     page_size = 9
     total_pages = (len(final_hits) - 1) // page_size + 1
     current_page = st.session_state.page
-
-    # --- FIX: New pagination component is rendered here ---
+    
     render_pagination(total_pages, current_page)
 
     start_idx = current_page * page_size

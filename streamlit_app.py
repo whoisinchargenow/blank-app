@@ -216,53 +216,69 @@ color_threshold = st.sidebar.slider("Color similarity threshold", 0, 150, 50, 10
 visual_weight = 0.85
 text_weight = 0.35 if search_query.strip() else 0.0
 
-results_payload: Optional[Dict[str, Any]] = None
 final_hits = []
+active_filters = []
 
-# Main search logic with pre-filtering
+# --- MODIFIED: Filter Building Logic ---
+
+# 1. Build Color Filter
+color_filter_string = None
+if uploaded_file and use_color_filter:
+    img_bytes = uploaded_file.getvalue()
+    query_rgb = get_dominant_color(img_bytes)
+    if query_rgb is not None:
+        r, g, b = query_rgb
+        r_min, r_max = max(0, r - color_threshold), min(255, r + color_threshold)
+        g_min, g_max = max(0, g - color_threshold), min(255, g + color_threshold)
+        b_min, b_max = max(0, b - color_threshold), min(255, b + color_threshold)
+        color_filter_string = (
+            f"(color_r:[{r_min} TO {r_max}] AND "
+            f"color_g:[{g_min} TO {g_max}] AND "
+            f"color_b:[{b_min} TO {b_max}])"
+        )
+        active_filters.append(color_filter_string)
+
+# 2. Build Text Filter
+if search_query.strip():
+    # This filter ensures all search words are present in the 'name' field
+    search_words = search_query.strip().split()
+    text_filters_for_name = [f'{TITLE_FIELD}:*"{word}"*' for word in search_words] # Use quotes for phrase matching
+    text_filter_string = " AND ".join(text_filters_for_name)
+    active_filters.append(f"({text_filter_string})")
+
+# 3. Combine all active filters
+final_filter_string = " AND ".join(active_filters) if active_filters else None
+
+
+# --- Main search logic ---
 if uploaded_file:
     st.sidebar.image(uploaded_file, caption="Uploaded Image", width=180)
-    img_bytes = uploaded_file.getvalue()
-
+    if use_color_filter and color_filter_string:
+         hex_color = to_hex(query_rgb)
+         st.sidebar.markdown(f"""
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-family: 'Source Sans Pro', sans-serif; color: #262730;">
+                <span style="font-size: 0.9rem;">Filtering by dominant color:</span>
+                <div style="width: 25px; height: 25px; background-color: {hex_color}; border: 1px solid #ccc; border-radius: 4px;"></div>
+            </div>
+            """, unsafe_allow_html=True)
+            
     try:
         query_url = upload_query_image_to_r2(img_bytes, uploaded_file.name)
     except Exception as e:
         st.error(f"Failed to upload to R2: {e}")
         st.stop()
 
-    color_filter_string = None
-    if use_color_filter:
-        query_rgb = get_dominant_color(img_bytes)
-        if query_rgb is not None:
-            r, g, b = query_rgb
-            # Define a bounding box in the RGB color space for the filter
-            r_min, r_max = max(0, r - color_threshold), min(255, r + color_threshold)
-            g_min, g_max = max(0, g - color_threshold), min(255, g + color_threshold)
-            b_min, b_max = max(0, b - color_threshold), min(255, b + color_threshold)
-            color_filter_string = (
-                f"(color_r:[{r_min} TO {r_max}] AND "
-                f"color_g:[{g_min} TO {g_max}] AND "
-                f"color_b:[{b_min} TO {b_max}])"
-            )
-            
-            # --- MODIFIED: Display the dominant color swatch in the sidebar ---
-            hex_color = to_hex(query_rgb)
-            st.sidebar.markdown(f"""
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-family: 'Source Sans Pro', sans-serif; color: #262730;">
-                <span style="font-size: 0.9rem;">Filtering by dominant color:</span>
-                <div style="width: 25px; height: 25px; background-color: {hex_color}; border: 1px solid #ccc; border-radius: 4px;"></div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    with st.spinner("Searching for visually similar items..."):
-        vis_res = marqo_search(query_url, limit=200, attrs=[IMAGE_FIELD], filter_string=color_filter_string)
-        sem_res = marqo_search(query_url, limit=200, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=color_filter_string)
+    with st.spinner("Searching..."):
+        # Image-based search (semantic)
+        vis_res = marqo_search(query_url, limit=200, attrs=[IMAGE_FIELD], filter_string=final_filter_string)
+        sem_res = marqo_search(query_url, limit=200, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
         vis_hits = vis_res.get("hits", []) if vis_res else []
         sem_hits = sem_res.get("hits", []) if sem_res else []
         fused_img = fuse_hits(vis_hits, sem_hits, alpha=visual_weight)
 
+        # Text-based search (semantic + lexical filter)
         if search_query.strip():
-            txt_res = marqo_search(search_query.strip(), limit=200, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=color_filter_string)
+            txt_res = marqo_search(search_query.strip(), limit=200, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
             txt_hits = txt_res.get("hits", []) if txt_res else []
             final_hits = fuse_hits(fused_img, txt_hits, alpha=1.0 - text_weight) if text_weight > 0 else fused_img
         else:
@@ -270,7 +286,7 @@ if uploaded_file:
 
 elif search_query.strip():
     with st.spinner("Searching by text..."):
-        txt_res = marqo_search(search_query.strip(), limit=200, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD])
+        txt_res = marqo_search(search_query.strip(), limit=200, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
         final_hits = txt_res.get("hits", []) if txt_res else []
 else:
     st.info("Please upload an image or enter a search query.")
@@ -288,7 +304,6 @@ if final_hits:
     total_pages = (len(final_hits) - 1) // page_size + 1 if final_hits else 0
     current_page = st.session_state.page
 
-    # Ensure current_page is valid
     if current_page >= total_pages:
         current_page = 0
         st.session_state.page = 0
@@ -326,7 +341,6 @@ if final_hits:
             if isinstance(click_url, str) and click_url:
                 st.markdown(f"[🔗 Open Product]({click_url})")
             
-            # Display dominant color hex if available
             dom_color_hex = h.get(DOM_COLOR_FIELD)
             if dom_color_hex:
                 st.markdown(f"""
@@ -339,4 +353,4 @@ if final_hits:
             st.markdown('---')
 
 elif uploaded_file or search_query:
-    st.warning("No results found. Try adjusting your query or the color filter threshold.")
+    st.warning("No results found. Try adjusting your query or the filter settings.")

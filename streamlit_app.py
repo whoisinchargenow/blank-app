@@ -151,7 +151,6 @@ final_hits = []
 if uploaded_file:
     st.sidebar.image(uploaded_file, caption="Uploaded Image", width=180)
     
-    # --- UI MODIFICATION: Color controls are now ONLY shown for image searches ---
     st.sidebar.markdown("---")
     st.sidebar.write("**Image Options**")
     use_color_filter = st.sidebar.checkbox("Enable color filtering", value=True)
@@ -181,7 +180,8 @@ if uploaded_file:
     # 2. Build Text Filter (if text is also provided)
     if search_query.strip():
         search_words = search_query.strip().split()
-        text_filters = [f'{TITLE_FIELD}:*"{word}"*' for word in search_words]
+        # --- MODIFICATION: Simplified filter syntax (no quotes) ---
+        text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
         active_filters.append(f"({' AND '.join(text_filters)})")
 
     final_filter_string = " AND ".join(active_filters) if active_filters else None
@@ -203,7 +203,8 @@ if uploaded_file:
 
         if search_query.strip():
             text_weight = 0.35
-            txt_res = marqo_search(search_query.strip(), attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
+            # --- MODIFICATION: Increased search limit ---
+            txt_res = marqo_search(search_query.strip(), limit=1000, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
             txt_hits = txt_res.get("hits", []) if txt_res else []
             final_hits = fuse_hits(fused_img, txt_hits, alpha=1.0 - text_weight)
         else:
@@ -212,13 +213,13 @@ if uploaded_file:
 # --- Main Logic Branch: Text-Only Search ---
 elif search_query.strip():
     with st.spinner("Searching by text..."):
-        # Build filter to ensure search words are in the name
         search_words = search_query.strip().split()
-        text_filters = [f'{TITLE_FIELD}:*"{word}"*' for word in search_words]
+        # --- MODIFICATION: Simplified filter syntax (no quotes) ---
+        text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
         final_filter_string = f"({' AND '.join(text_filters)})"
         
-        # Perform semantic search with the name filter applied
-        txt_res = marqo_search(search_query.strip(), attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
+        # --- MODIFICATION: Increased search limit ---
+        txt_res = marqo_search(search_query.strip(), limit=1000, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=final_filter_string)
         final_hits = txt_res.get("hits", []) if txt_res else []
 
 # --- Initial State ---

@@ -67,6 +67,53 @@ PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "") or ""
 KNOWN_TENSOR_FIELDS = {"image", "name", "description", "spec_text", "search_blob"}
 
 
+def get_hit_field(hit: Dict[str, Any], *names: str) -> Optional[Any]:
+    """Safely get a field from different possible locations in Marqo hits.
+    Checks top-level, then 'fields', then 'document'. Returns first non-empty value.
+    """
+    for n in names:
+        if n in hit and hit.get(n) not in (None, ""):
+            return hit.get(n)
+    f = hit.get("fields") or {}
+    for n in names:
+        if n in f and f.get(n) not in (None, ""):
+            return f.get(n)
+    d = hit.get("document") or {}
+    for n in names:
+        if n in d and d.get(n) not in (None, ""):
+            return d.get(n)
+    return None
+
+
+def sanitize_attrs(attrs: Optional[List[str]], *, for_method: str) -> List[str]:
+    """Map aliases and drop unknown fields to avoid 400s from Marqo.
+    - maps 'title' -> 'name'
+    - removes attributes not in KNOWN_TENSOR_FIELDS
+    - for LEXICAL, defaults to textual fields
+    - for TENSOR image queries, you can pass [IMAGE_FIELD]
+    """
+    if attrs is None:
+        if for_method.upper() == "LEXICAL":
+            attrs = [TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
+        else:
+            attrs = [IMAGE_FIELD, TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
+    clean: List[str] = []
+    for a in attrs:
+        if not a:
+            continue
+        a = a.strip()
+        if a == "title":
+            a = "name"
+        if a in KNOWN_TENSOR_FIELDS and a not in clean:
+            clean.append(a)
+    if not clean:
+        clean = [IMAGE_FIELD] if for_method.upper() == "TENSOR" else [TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
+    return clean
+
+# Known tensor fields present in your index (adjust if you add more)
+KNOWN_TENSOR_FIELDS = {"image", "name", "description", "spec_text", "search_blob"}
+
+
 def sanitize_attrs(attrs: Optional[List[str]], *, for_method: str) -> List[str]:
     """Map aliases and drop unknown fields to avoid 400s from Marqo.
     - maps 'title' -> 'name'
@@ -228,7 +275,7 @@ def marqo_search(q: str, limit: int = 200, attrs: Optional[List[str]] = None, me
         "searchableAttributes": searchable_attrs,
         "attributesToRetrieve": [
             "_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD,
-            DOM_COLOR_FIELD, SKU_FIELD, CLICK_URL_FIELD,
+            DOM_COLOR_FIELD, SKU_FIELD, "product_id", "sku", "SKU", CLICK_URL_FIELD,
             DESCRIPTION_FIELD, SEARCH_BLOB_FIELD,
         ],
     }
@@ -507,11 +554,11 @@ if final_hits:
     cols = st.columns(5)
     for i, h in enumerate(page_hits):
         with cols[i % 5]:
-            img_url = h.get(IMAGE_FIELD) or h.get(ALT_IMAGE_FIELD) or h.get("image")
-            title = h.get(TITLE_FIELD, h.get('title', 'Be pavadinimo'))
-            sku = h.get(SKU_FIELD) or h.get('product_id')
-            click_url = h.get(CLICK_URL_FIELD)
-            dom_color_hex = h.get(DOM_COLOR_FIELD)
+            img_url = get_hit_field(h, IMAGE_FIELD, ALT_IMAGE_FIELD, "image")
+            title = get_hit_field(h, TITLE_FIELD, 'title') or 'Be pavadinimo'
+            sku = get_hit_field(h, SKU_FIELD, 'product_id', 'sku', 'SKU') or h.get('_id')
+            click_url = get_hit_field(h, CLICK_URL_FIELD, 'product_url')
+            dom_color_hex = get_hit_field(h, DOM_COLOR_FIELD, 'dominant_color')
             score = h.get('_fused_score', h.get('_score', None))
 
             if img_url:

@@ -93,6 +93,10 @@ TYPE_KEYWORDS = {
     "rug": ["rug", "carpet"]
 }
 
+# Search attribute sets for dual-search fusion
+TEXT_ATTRS = [TITLE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD, SEARCH_BLOB_FIELD]
+VISUAL_ATTRS = [IMAGE_FIELD]
+
 # =============================================================
 # R2 helpers (upload the query image)
 # =============================================================
@@ -219,24 +223,24 @@ def postfilter_hits_by_type(hits: List[Dict[str, Any]], target_type: str) -> Lis
 # Marqo search (HTTP API)
 # =============================================================
 
-def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
     """
     Performs a tensor search on Marqo.
     q can be a text phrase or an image URL accessible to Marqo.
     """
-    searchable_attributes_with_weights = {
-        IMAGE_FIELD: 2.0,                # prioritize visual similarity
-        TITLE_FIELD: 1.1,
-        DESCRIPTION_FIELD: 1.0,
-        SPEC_TEXT_FIELD: 0.9,
-        SEARCH_BLOB_FIELD: 0.8,
-    }
+    searchable_attributes = attrs or [
+        IMAGE_FIELD,
+        TITLE_FIELD,
+        DESCRIPTION_FIELD,
+        SPEC_TEXT_FIELD,
+        SEARCH_BLOB_FIELD,
+    ]
 
     payload: Dict[str, Any] = {
         "limit": limit,
         "q": q,
         "searchMethod": "TENSOR",
-        "searchableAttributes": searchable_attributes_with_weights,
+        "searchableAttributes": searchable_attributes,
         "attributesToRetrieve": [
             "_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD,
             SKU_FIELD, OBJECT_TYPE_FIELD, DESCRIPTION_FIELD, SPEC_TEXT_FIELD,
@@ -306,6 +310,18 @@ search_query = st.sidebar.text_input("🔍 Ieškoti pagal tekstą:", "")
 color_threshold = st.sidebar.slider("Spalvos panašumo riba", 0, 200, 50, 10)
 use_color_filter = st.sidebar.checkbox("Įjungti spalvos filtravimą", value=True)
 
+# Boosting sliders
+visual_weight = st.sidebar.slider(
+    "🧮 Vaizdo svoris (α)", 0.0, 1.0, 0.75, 0.05,
+    help="Kiek stipriai vertinti vizualų panašumą. 1.0 — tik vaizdas, 0.0 — tik tekstinės savybės."
+)
+text_weight = None
+if search_query.strip():
+    text_weight = st.sidebar.slider(
+        "🔤 Teksto svoris (β)", 0.0, 1.0, 0.35, 0.05,
+        help="Kiek pridėti vartotojo teksto paiešką prie rezultato (sujungiama su vaizdo paieška)."
+    )
+
 # Object type manual override (will be filled after inference)
 if st.session_state.detected_object_type:
     # Build choices from TYPE_KEYWORDS keys for cleaner options
@@ -358,24 +374,32 @@ if uploaded_file:
                 # Try hard filter first (requires OBJECT_TYPE_FIELD in index)
                 filter_query = f'{OBJECT_TYPE_FIELD}:"{inferred}"'
 
-            # Step 2: image search WITH hard filter (when possible)
-            main_img = marqo_search(query_url, limit=200, filter_string=filter_query) if filter_query else marqo_search(query_url, limit=200)
-            img_hits = main_img.get("hits", []) if main_img else []
+            # Step 2: run two searches for controllable boosting: visual-only and semantic (text fields)
+img_vis = marqo_search(query_url, limit=200, filter_string=filter_query, attrs=VISUAL_ATTRS)
+img_sem = marqo_search(query_url, limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
+img_vis_hits = img_vis.get("hits", []) if img_vis else []
+img_sem_hits = img_sem.get("hits", []) if img_sem else []
 
-            # If OBJECT_TYPE is missing from index, post-filter by keywords
-            if inferred and (not img_hits or OBJECT_TYPE_FIELD not in img_hits[0]):
-                img_hits = postfilter_hits_by_type(img_hits, inferred)
+# If OBJECT_TYPE is missing from index, post-filter by keywords
+if inferred:
+    if not img_vis_hits or (img_vis_hits and OBJECT_TYPE_FIELD not in img_vis_hits[0]):
+        img_vis_hits = postfilter_hits_by_type(img_vis_hits, inferred)
+    if not img_sem_hits or (img_sem_hits and OBJECT_TYPE_FIELD not in img_sem_hits[0]):
+        img_sem_hits = postfilter_hits_by_type(img_sem_hits, inferred)
 
-            # Optional: if the user also typed text, do a text search (same filter) and fuse
-            if search_query.strip():
-                txt_res = marqo_search(search_query.strip(), limit=200, filter_string=filter_query)
-                txt_hits = txt_res.get("hits", []) if txt_res else []
-                if inferred and (not txt_hits or (txt_hits and OBJECT_TYPE_FIELD not in txt_hits[0])):
-                    txt_hits = postfilter_hits_by_type(txt_hits, inferred)
-                fused = fuse_hits(img_hits, txt_hits, alpha=0.75)
-                results_payload = {"hits": fused}
-            else:
-                results_payload = {"hits": img_hits}
+# Fuse the two lists with adjustable visual weight
+fused_img = fuse_hits(img_vis_hits, img_sem_hits, alpha=visual_weight)
+
+# Optional: if the user also typed text, do a text search (same filter) and fuse again
+if search_query.strip():
+    txt_res = marqo_search(search_query.strip(), limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
+    txt_hits = txt_res.get("hits", []) if txt_res else []
+    if inferred and (not txt_hits or (txt_hits and OBJECT_TYPE_FIELD not in txt_hits[0])):
+        txt_hits = postfilter_hits_by_type(txt_hits, inferred)
+    gamma = text_weight if text_weight is not None else 0.35
+    results_payload = {"hits": fuse_hits(fused_img, txt_hits, alpha=1.0 - gamma)}
+else:
+    results_payload = {"hits": fused_img}
 
 elif search_query.strip():
     with st.spinner("Ieškoma pagal tekstą..."):
@@ -384,7 +408,7 @@ elif search_query.strip():
         manual_t = st.session_state.selected_object_type
         if manual_t:
             filter_query = f'{OBJECT_TYPE_FIELD}:"{manual_t}"'
-        txt = marqo_search(search_query.strip(), limit=200, filter_string=filter_query)
+        txt = marqo_search(search_query.strip(), limit=200, filter_string=filter_query, attrs=TEXT_ATTRS)
         hits = txt.get("hits", []) if txt else []
         # If no hard type field, try post-filter by manual type
         if manual_t and (not hits or OBJECT_TYPE_FIELD not in hits[0]):

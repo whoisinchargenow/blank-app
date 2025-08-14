@@ -82,7 +82,6 @@ def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
     except Exception:
         return None
 
-# --- MODIFIED: marqo_search now accepts a search method ---
 def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None, method: str = "TENSOR") -> Optional[Dict[str, Any]]:
     """Performs a search on Marqo, allowing method to be 'TENSOR' or 'LEXICAL'."""
     payload: Dict[str, Any] = {
@@ -183,7 +182,12 @@ if uploaded_file:
             b_min, b_max = max(0, b - color_threshold), min(255, b + color_threshold)
             color_filter_string = f"(color_r:[{r_min} TO {r_max}] AND color_g:[{g_min} TO {g_max}] AND color_b:[{b_min} TO {b_max}])"
             hex_color = to_hex(query_rgb)
-            st.sidebar.markdown(f"""...""", unsafe_allow_html=True) # Omitted for brevity
+            st.sidebar.markdown(f"""
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-family: 'Source Sans Pro', sans-serif; color: #262730;">
+                    <span style="font-size: 0.9rem;">Filtering by dominant color:</span>
+                    <div style="width: 25px; height: 25px; background-color: {hex_color}; border: 1px solid #ccc; border-radius: 4px;"></div>
+                </div>
+                """, unsafe_allow_html=True)
 
     with st.spinner("Searching..."):
         try:
@@ -193,16 +197,15 @@ if uploaded_file:
         
         vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD], filter_string=color_filter_string)
         sem_res = marqo_search(query_url, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=color_filter_string)
-        image_search_results = fuse_hits(vis_res.get("hits", []), sem_res.get("hits", []))
+        
+        # --- FIX: Safely get hits, providing an empty list if the search failed ---
+        vis_hits = vis_res.get("hits", []) if vis_res else []
+        sem_hits = sem_res.get("hits", []) if sem_res else []
+        image_search_results = fuse_hits(vis_hits, sem_hits)
 
         if search_query.strip():
-            # --- MODIFICATION: Use LEXICAL search to get a reliable list of text matches ---
-            txt_res = marqo_search(
-                q=search_query.strip(),
-                limit=1000,
-                attrs=[TITLE_FIELD],
-                method="LEXICAL"  # Use keyword search for this step
-            )
+            txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD], method="LEXICAL")
+            # Safely get hits from the text search
             text_search_hits = txt_res.get("hits", []) if txt_res else []
             
             image_result_ids = {hit['_id'] for hit in image_search_results}
@@ -215,13 +218,8 @@ if uploaded_file:
 # --- Main Logic Branch: Text-Only Search ---
 elif search_query.strip():
     with st.spinner("Searching by text..."):
-        # --- MODIFICATION: Use LEXICAL search for reliable keyword matching ---
-        txt_res = marqo_search(
-            q=search_query.strip(),
-            limit=1000,
-            attrs=[TITLE_FIELD],
-            method="LEXICAL"
-        )
+        txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD], method="LEXICAL")
+        # Safely get hits from the text search
         final_hits = txt_res.get("hits", []) if txt_res else []
 
 # --- Initial State ---

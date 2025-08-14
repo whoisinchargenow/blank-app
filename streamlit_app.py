@@ -344,6 +344,18 @@ st.sidebar.header("Search Settings")
 uploaded_file = st.sidebar.file_uploader("Choose an image", type=["jpg", "jpeg", "png", "webp"])
 search_query = st.sidebar.text_input("🔍 Search by text")
 
+# --- Early reset: if a NEW image is uploaded, unhide colour controls BEFORE rendering them
+if uploaded_file:
+    try:
+        _img_preview_bytes = uploaded_file.getvalue()
+        _img_hash = hash(_img_preview_bytes)
+        if st.session_state.get('last_upload_hash') != _img_hash:
+            st.session_state['last_upload_hash'] = _img_hash
+            st.session_state['color_filter_hidden'] = False
+            st.session_state['color_controls_rerolled'] = False
+    except Exception:
+        pass
+
 # Colour controls: visible only when an image is uploaded
 if uploaded_file:
     if st.session_state.get('color_filter_hidden', False):

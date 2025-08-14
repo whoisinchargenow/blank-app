@@ -213,7 +213,7 @@ def infer_type_from_hit(hit: Dict[str, Any]) -> Optional[str]:
     # Prefer explicit field if present
     val = hit.get(OBJECT_TYPE_FIELD)
     if isinstance(val, str) and val:
-        return val.lower()
+        return canonicalize_type(val)
     # Otherwise infer from title/description/spec
     title = hit.get(TITLE_FIELD, hit.get("title", ""))
     desc = hit.get(DESCRIPTION_FIELD, "")
@@ -347,10 +347,7 @@ color_threshold = st.sidebar.slider("Spalvos panašumo riba", 0, 200, 50, 10)
 use_color_filter = st.sidebar.checkbox("Įjungti spalvos filtravimą", value=True)
 
 # Boosting sliders
-visual_weight = st.sidebar.slider(
-    "🧮 Vaizdo svoris (α)", 0.0, 1.0, 0.75, 0.05,
-    help="Kiek stipriai vertinti vizualų panašumą. 1.0 — tik vaizdas, 0.0 — tik tekstinės savybės."
-)
+visual_weight = 0.75  # fixed visual weight (removed UI slider)
 text_weight = None
 if search_query.strip():
     text_weight = st.sidebar.slider(
@@ -358,18 +355,6 @@ if search_query.strip():
         help="Kiek pridėti vartotojo teksto paiešką prie rezultato (sujungiama su vaizdo paieška)."
     )
 
-# Object type manual override (will be filled after inference)
-if st.session_state.detected_object_type:
-    # Build choices from TYPE_KEYWORDS keys for cleaner options
-    type_choices = list(TYPE_KEYWORDS.keys())
-    default_idx = type_choices.index(st.session_state.detected_object_type) if st.session_state.detected_object_type in type_choices else 0
-    st.sidebar.selectbox(
-        "🧠 Aptiktas tipas (galite pakeisti)",
-        options=type_choices,
-        index=default_idx,
-        key='selected_object_type',
-        help="Sistema apribos paiešką iki pasirinkto tipo."
-    )
 
 # -----------------------------
 # Main logic
@@ -404,7 +389,7 @@ if uploaded_file:
             inferred = canonicalize_type(inferred_raw) or ""
             st.session_state.detected_object_type = inferred
             # Only set selected type if it is a valid canonical option
-            if inferred in TYPE_KEYWORDS.keys():
+            if inferred in TYPE_KEYWORDS.keys() and (st.session_state.get('selected_object_type') in (None, "")):
                 st.session_state.selected_object_type = inferred
 
             # Build a filter if the index stores OBJECT_TYPE_FIELD

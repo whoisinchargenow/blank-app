@@ -463,6 +463,17 @@ if not uploaded_file:
         value="#d9bc92",
         help="Taikoma tik tekstinei paieškai. Parinkta spalva naudojama atrinkti vizualiai panašius atspalvius.",
     )
+    # Spalvos panašumo slankiklis (tik tekstinei paieškai)
+    st.sidebar.slider(
+        "Spalvos panašumo riba",
+        0, 150,
+        st.session_state.get('text_color_threshold', 60), 10,
+        key="text_color_threshold",
+        help=(
+            "Kuo mažesnė reikšmė, tuo griežčiau parenkamos tik labai panašios spalvos. "
+            "Didesnė reikšmė leidžia platesnį atspalvių diapazoną."
+        ),
+    )
 
 # --- Early reset: if a NEW image is uploaded, unhide colour controls BEFORE rendering them
 is_new_upload = False
@@ -593,7 +604,7 @@ elif search_query.strip():
 
         # Apply colour filter (from text or picker), if any
         if color_rgb_text is not None and final_hits:
-            threshold = float(st.session_state.get('color_threshold', 60))
+            threshold = float(st.session_state.get('text_color_threshold', 60))
             kept, unknowns = [], []
             for h in final_hits:
                 hx = get_hit_field(h, DOM_COLOR_FIELD, 'dominant_color')

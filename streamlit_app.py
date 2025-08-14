@@ -159,6 +159,45 @@ def hex_to_rgb(hex_color: str) -> Optional[np.ndarray]:
 def color_distance(c1: np.ndarray, c2: np.ndarray) -> float:
     return float(np.linalg.norm(c1.astype(float) - c2.astype(float)))
 
+# -----------------------------
+# Color-name → RGB mapping & parser (LT + EN)
+# -----------------------------
+COLOR_NAME_RGB: Dict[str, Tuple[int, int, int]] = {
+    # Reds
+    "raudona": (200, 30, 30), "raudonas": (200, 30, 30), "red": (200, 30, 30), "bordo": (128, 0, 32), "burgundy": (128, 0, 32),
+    # Blues
+    "mėlyna": (30, 60, 200), "melyna": (30, 60, 200), "blue": (30, 60, 200), "turkio": (64, 224, 208), "turquoise": (64, 224, 208),
+    # Greens
+    "žalia": (40, 160, 60), "zalia": (40, 160, 60), "green": (40, 160, 60), "mėtinė": (170, 240, 200), "metine": (170, 240, 200), "mint": (170, 240, 200),
+    # Neutrals
+    "juoda": (20, 20, 20), "black": (20, 20, 20), "balta": (245, 245, 245), "white": (245, 245, 245),
+    "pilka": (128, 128, 128), "pilkas": (128, 128, 128), "grey": (128, 128, 128), "gray": (128, 128, 128),
+    # Warm tones
+    "geltona": (240, 220, 80), "yellow": (240, 220, 80), "oranžinė": (245, 150, 50), "oranzine": (245, 150, 50), "orange": (245, 150, 50),
+    "ruda": (120, 80, 50), "brown": (120, 80, 50), "auksinė": (212, 175, 55), "auksine": (212, 175, 55), "gold": (212, 175, 55),
+    "sidabrinė": (192, 192, 192), "sidabrine": (192, 192, 192), "silver": (192, 192, 192),
+    # Others
+    "rožinė": (255, 160, 180), "rozine": (255, 160, 180), "pink": (255, 160, 180),
+    "violetinė": (150, 90, 200), "violetine": (150, 90, 200), "purple": (150, 90, 200),
+    "smėlio": (222, 203, 178), "smelio": (222, 203, 178), "beige": (222, 203, 178), "kremas": (243, 229, 171), "cream": (243, 229, 171),
+}
+
+
+def parse_color_from_text(text: str) -> Tuple[Optional[np.ndarray], str]:
+    """Extract the first color word (LT/EN) from the text and return (rgb, remaining_text)."""
+    if not isinstance(text, str):
+        return None, ""
+    words = [w.strip().lower() for w in text.replace("/", " ").replace("-", " ").split() if w.strip()]
+    color_rgb: Optional[np.ndarray] = None
+    rest_words: List[str] = []
+    for w in words:
+        if color_rgb is None and w in COLOR_NAME_RGB:
+            color_rgb = np.array(COLOR_NAME_RGB[w], dtype=int)
+        else:
+            rest_words.append(w)
+    remaining = " ".join(rest_words)
+    return color_rgb, remaining
+
 
 # Robust, object-focused dominant colour for the **query image**
 # (center-weight + saturation/value mask + relaxed fallbacks)
@@ -487,8 +526,12 @@ if uploaded_file:
         image_search_results = fuse_hits(vis_hits, sem_hits, alpha=0.88)
 
         if search_query.strip():
-            # Lexical text search to refine
-            txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
+            # Parse color from text; if provided, use it to override image color filter
+            color_rgb_text, rest_text = parse_color_from_text(search_query)
+            if color_rgb_text is not None:
+                query_rgb = color_rgb_text
+            qtext = rest_text.strip() if rest_text else search_query.strip()
+            txt_res = marqo_search(q=qtext, limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
             text_hits = txt_res.get("hits", []) if txt_res else []
             text_ids = {h.get('_id') for h in text_hits}
             final_hits = [h for h in image_search_results if h.get('_id') in text_ids]
@@ -522,8 +565,24 @@ elif search_query.strip():
     st.session_state.color_controls_rerolled = False
 
     with st.spinner("Ieškoma pagal tekstą..."):
-        txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
+        color_rgb_text, rest_text = parse_color_from_text(search_query)
+        qtext = (rest_text.strip() if rest_text else "baldai")  # neutral fallback to fetch a broad set
+        txt_res = marqo_search(q=qtext, limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
         final_hits = txt_res.get("hits", []) if txt_res else []
+
+        # Apply colour filter from text, if any
+        if color_rgb_text is not None and final_hits:
+            threshold = float(st.session_state.get('color_threshold', 60))
+            kept, unknowns = [], []
+            for h in final_hits:
+                hx = get_hit_field(h, DOM_COLOR_FIELD, 'dominant_color')
+                rgb = hex_to_rgb(hx) if isinstance(hx, str) else None
+                if rgb is None:
+                    unknowns.append(h)
+                    continue
+                if color_distance(color_rgb_text, rgb) <= threshold:
+                    kept.append(h)
+            final_hits = kept if kept else final_hits
 
 # --- Initial State ---
 else:

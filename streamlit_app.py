@@ -183,32 +183,40 @@ if uploaded_file:
             st.error(f"Failed to upload image: {e}")
             st.stop()
         
-        # --- MODIFICATION: Perform image search with ONLY the color filter ---
+        # Perform image search with ONLY the color filter
         visual_weight = 0.85
         vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD], filter_string=color_filter_string)
         sem_res = marqo_search(query_url, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=color_filter_string)
         vis_hits = vis_res.get("hits", []) if vis_res else []
         sem_hits = sem_res.get("hits", []) if sem_res else []
-        fused_img_results = fuse_hits(vis_hits, sem_hits, alpha=visual_weight)
+        image_search_results = fuse_hits(vis_hits, sem_hits, alpha=visual_weight)
 
-        # --- MODIFICATION: If text is present, perform a separate, more restrictive search and fuse ---
         if search_query.strip():
-            text_weight = 0.35
+            # If text is present, we INTERSECT the image results with the text results.
             
-            # Build a combined filter for the text search part
-            active_filters = []
-            if color_filter_string:
-                active_filters.append(color_filter_string)
+            # Build the text filter
             search_words = search_query.strip().split()
             text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
-            active_filters.append(f"({' AND '.join(text_filters)})")
-            text_search_filter = " AND ".join(active_filters)
+            # The text filter is applied on its own to get all matching items
+            text_filter_string = f"({' AND '.join(text_filters)})"
 
-            txt_res = marqo_search(search_query.strip(), limit=1000, attrs=[TITLE_FIELD, SEARCH_BLOB_FIELD], filter_string=text_search_filter)
-            txt_hits = txt_res.get("hits", []) if txt_res else []
-            final_hits = fuse_hits(fused_img_results, txt_hits, alpha=1.0 - text_weight)
+            # Search ONLY by text filter to get a list of all items with the name
+            # The query `q` is the text itself to provide some semantic ranking.
+            # We use a high limit to ensure we find all potential matches.
+            txt_res = marqo_search(search_query.strip(), limit=5000, attrs=[TITLE_FIELD], filter_string=text_filter_string)
+            text_search_hits = txt_res.get("hits", []) if txt_res else []
+
+            # --- MODIFICATION: Intersect results instead of fusing ---
+            image_result_ids = {hit['_id'] for hit in image_search_results}
+            text_result_ids = {hit['_id'] for hit in text_search_hits}
+
+            # Find the common IDs
+            common_ids = image_result_ids.intersection(text_result_ids)
+
+            # Keep only the hits from the (better ranked) image search that are in the common set
+            final_hits = [hit for hit in image_search_results if hit['_id'] in common_ids]
         else:
-            final_hits = fused_img_results
+            final_hits = image_search_results
 
 # --- Main Logic Branch: Text-Only Search ---
 elif search_query.strip():

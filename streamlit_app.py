@@ -75,10 +75,14 @@ def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
         return None
 
 def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, attrs: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
-    # This function now only performs TENSOR searches
+    # --- FIX: Add a default for searchable_attributes to prevent 400 errors ---
+    searchable_attrs = attrs
+    if searchable_attrs is None:
+        searchable_attrs = [TITLE_FIELD, SEARCH_BLOB_FIELD]
+
     payload: Dict[str, Any] = {
         "limit": limit, "q": q, "searchMethod": "TENSOR",
-        "searchableAttributes": attrs,
+        "searchableAttributes": searchable_attrs,
         "attributesToRetrieve": ["_id", TITLE_FIELD, IMAGE_FIELD, ALT_IMAGE_FIELD, DOM_COLOR_FIELD, SKU_FIELD, CLICK_URL_FIELD, "_score"]
     }
     if filter_string: payload["filter"] = filter_string
@@ -90,6 +94,23 @@ def marqo_search(q: str, limit: int = 200, filter_string: Optional[str] = None, 
     except requests.exceptions.RequestException as e:
         st.error(f"API search error: {e.response.text if e.response else e}")
         return None
+
+# --- FIX: Restore the missing fuse_hits function ---
+def fuse_hits(img_hits: List[Dict[str, Any]], txt_hits: List[Dict[str, Any]], alpha: float = 0.7) -> List[Dict[str, Any]]:
+    """Weighted late-fusion of two hit lists by _id."""
+    def to_map(hits):
+        return {h.get('_id'): float(h.get('_score', 0.0)) for h in hits}
+    imap, tmap = to_map(img_hits), to_map(txt_hits)
+    ids = set(imap) | set(tmap)
+    fused = []
+    for _id in ids:
+        s = alpha * imap.get(_id, 0.0) + (1 - alpha) * tmap.get(_id, 0.0)
+        base = next((h for h in img_hits if h.get('_id') == _id), None) or next((h for h in txt_hits if h.get('_id') == _id), None)
+        if not base: continue
+        h = dict(base); h['_fused_score'] = s
+        fused.append(h)
+    fused.sort(key=lambda x: x.get('_fused_score', 0.0), reverse=True)
+    return fused
 
 def upload_query_image_to_r2(img_bytes: bytes, filename: str) -> str:
     if not PUBLIC_BASE_URL: raise RuntimeError("PUBLIC_BASE_URL is not configured.")
@@ -180,7 +201,7 @@ if uploaded_file:
             search_words = search_query.strip().split()
             text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
             text_filter_string = f"({' AND '.join(text_filters)})"
-
+            
             txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD], filter_string=text_filter_string)
             text_search_hits = txt_res.get("hits", []) if txt_res else []
             
@@ -198,13 +219,7 @@ elif search_query.strip():
         text_filters = [f'{TITLE_FIELD}:*{word}*' for word in search_words]
         final_filter_string = f"({' AND '.join(text_filters)})"
         
-        # --- MODIFICATION: Search semantically on the name field AND filter on it ---
-        txt_res = marqo_search(
-            q=search_query.strip(),
-            limit=1000,
-            attrs=[TITLE_FIELD], # Focus semantic search on the name
-            filter_string=final_filter_string # Enforce keyword presence
-        )
+        txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD], filter_string=final_filter_string)
         final_hits = txt_res.get("hits", []) if txt_res else []
 
 # --- Initial State ---

@@ -561,7 +561,14 @@ if final_hits:
             dom_color_hex = get_hit_field(h, DOM_COLOR_FIELD, 'dominant_color')
             score = h.get('_fused_score', h.get('_score', None))
 
-            if img_url:
+            if img_url and click_url:
+                alt_txt = f"{title} · SKU {sku}" if sku else title
+                st.markdown(
+                    f'<a href="{click_url}" target="_blank" rel="noopener noreferrer" title="Atidaryti produktą">'
+                    f'<img src="{img_url}" alt="{alt_txt}" style="width:100%;border-radius:12px;display:block;"/></a>',
+                    unsafe_allow_html=True,
+                )
+            elif img_url:
                 st.image(img_url, use_container_width=True)
             if sku:
                 st.write(f"**{title}** · SKU: `{sku}`")

@@ -404,8 +404,9 @@ uploaded_file = st.sidebar.file_uploader(
 search_query = st.sidebar.text_input(
     "🔍 Ieškoti pagal tekstą",
     help=(
-        "Įveskite produkto pavadinimą, modelį ar apibūdinančius žodžius. "
-        "Teksto paieška susiaurina vizualiai rastus rezultatus; jei neįkelta nuotrauka – ieško tik pagal tekstą."
+        "Įveskite produkto pavadinimą, modelį ar frazę (pvz., ‘raudona sofa’). "
+        "Paieška vertina visos frazės prasmę (semantiškai), todėl ‘raudona sofa’ ieškos būtent raudonų sofų. "
+        "Jei įkelta nuotrauka, tekstas susiaurina vizualiai rastus rezultatus; jei nuotraukos nėra – ieško tik pagal tekstą."
     ),
 )
 
@@ -487,7 +488,7 @@ if uploaded_file:
 
         if search_query.strip():
             # Lexical text search to refine
-            txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="LEXICAL")
+            txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
             text_hits = txt_res.get("hits", []) if txt_res else []
             text_ids = {h.get('_id') for h in text_hits}
             final_hits = [h for h in image_search_results if h.get('_id') in text_ids]
@@ -521,7 +522,7 @@ elif search_query.strip():
     st.session_state.color_controls_rerolled = False
 
     with st.spinner("Ieškoma pagal tekstą..."):
-        txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="LEXICAL")
+        txt_res = marqo_search(q=search_query.strip(), limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
         final_hits = txt_res.get("hits", []) if txt_res else []
 
 # --- Initial State ---

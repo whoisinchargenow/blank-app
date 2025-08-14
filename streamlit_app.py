@@ -344,13 +344,18 @@ st.sidebar.header("Search Settings")
 uploaded_file = st.sidebar.file_uploader("Choose an image", type=["jpg", "jpeg", "png", "webp"])
 search_query = st.sidebar.text_input("🔍 Search by text")
 
-# Colour controls (hidden dynamically when catalogue lacks colours)
-if st.session_state.get('color_filter_hidden', False):
+# Colour controls: visible only when an image is uploaded
+if uploaded_file:
+    if st.session_state.get('color_filter_hidden', False):
+        use_color_filter = False
+        color_threshold = 50
+    else:
+        use_color_filter = st.sidebar.checkbox("Enable color filtering", value=True)
+        color_threshold = st.sidebar.slider("Color similarity threshold", 0, 150, 50, 10)
+else:
+    # No image uploaded: hide and turn off colour filter
     use_color_filter = False
     color_threshold = 50
-else:
-    use_color_filter = st.sidebar.checkbox("Enable color filtering", value=True)
-    color_threshold = st.sidebar.slider("Color similarity threshold", 0, 150, 50, 10)
 
 final_hits: List[Dict[str, Any]] = []
 
@@ -417,8 +422,8 @@ if uploaded_file:
 
 # --- Main Logic Branch: Text-Only Search ---
 elif search_query.strip():
-    # Fresh text-only search re-enables colour controls (not used in this mode)
-    st.session_state.color_filter_hidden = False
+    # Text-only search: keep colour controls hidden & off
+    st.session_state.color_filter_hidden = True
     st.session_state.color_controls_rerolled = False
 
     with st.spinner("Searching by text..."):
@@ -427,6 +432,8 @@ elif search_query.strip():
 
 # --- Initial State ---
 else:
+    # Initial state: no image — hide colour controls
+    st.session_state.color_filter_hidden = True
     st.info("Please upload an image or enter a search query to begin.")
 
 # =============================================================

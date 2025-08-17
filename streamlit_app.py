@@ -700,9 +700,16 @@ if uploaded_file:
             st.error(f"Nepavyko įkelti paveikslėlio: {e}")
             st.stop()
 
-        # --- NEW: Google Lens reverse search (SerpAPI) ---
+        # --- Google Lens reverse search (SerpAPI) — CALL ONLY WHEN URL CHANGES ---
         if SERPAPI_KEY:
-            web_matches = google_lens_reverse(query_url, max_items=60) or web_matches
+            if (
+                st.session_state.get("serp_query_url") != query_url
+                or st.session_state.get("web_matches") is None
+            ):
+                # Cache in session so pagination (re-runs) don't re-hit SerpAPI
+                st.session_state["serp_query_url"] = query_url
+                st.session_state["web_matches"] = google_lens_reverse(query_url, max_items=120)
+            web_matches = st.session_state.get("web_matches", {"similar_images": [], "pages_including": []})
         else:
             web_matches = {"similar_images": [], "pages_including": []}
 
@@ -748,6 +755,7 @@ if uploaded_file:
             final_hits = image_search_results
 
 # --- Main Logic Branch: Text-Only Search ---
+elif search_query.strip():
 elif search_query.strip():
     # Text-only search: keep colour controls hidden & off
     st.session_state.color_filter_hidden = True
@@ -812,6 +820,9 @@ with col_main:
         end_idx = start_idx + page_size
         page_hits = final_hits[start_idx:end_idx]
 
+        # --- Marqo area scroll container (independent from right pane) ---
+        st.markdown('<div id="marqo-pane" style="max-height:78vh; overflow-y:auto; padding-right:8px;">', unsafe_allow_html=True)
+
         # ---- 4 columns instead of 5 ----
         cols = st.columns(4)
         for i, h in enumerate(page_hits):
@@ -847,6 +858,8 @@ with col_main:
                     )
                 st.markdown('---')
 
+        st.markdown('</div>', unsafe_allow_html=True)
+
     elif uploaded_file or search_query:
         st.warning("Rezultatų nerasta. Pabandykite pakoreguoti užklausą ar filtrus.")
     else:
@@ -863,14 +876,14 @@ with col_right:
             with st.expander("SerpAPI klaida"):
                 st.code(st.session_state["_serpapi_error"])
 
-        sims = (web_matches or {}).get("similar_images", [])
+        sims = (st.session_state.get("web_matches") or {}).get("similar_images", [])
         if not sims:
             st.caption("Nerasta atitikmenų (arba išnaudotas limitas).")
         else:
-            # Scrollable single-column gallery in the side pane
+            # Scrollable single-column gallery in the side pane (independent scroll)
             st.markdown(
                 """
-                <div style="max-height: 78vh; overflow-y: auto; padding-right: 6px;">
+                <div id="serpapi-pane" style="max-height:78vh; overflow-y:auto; padding-right:6px;">
                 """,
                 unsafe_allow_html=True,
             )

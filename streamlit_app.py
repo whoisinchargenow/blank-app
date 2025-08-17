@@ -586,29 +586,6 @@ selected_type = st.sidebar.selectbox(
 # Tekstinės paieškos atveju rodyti spalvų parinkiklį tik kai įvestas tekstas
 text_use_color_picker = False
 text_picker_hex: Optional[str] = None
-if (not uploaded_file) and search_query.strip():
-    text_use_color_picker = st.sidebar.checkbox(
-        "Filtruoti pagal pasirinktą spalvą",
-        value=False,
-        help="Jei įjungta, rezultatai bus filtruojami pagal žemiau pasirinktą spalvą.",
-    )
-    text_picker_hex = st.sidebar.color_picker(
-        "🎨 Pasirinkite spalvą",
-        value="#d9bc92",
-        help="Taikoma tik tekstinei paieškai. Parinkta spalva naudojama atrinkti vizualiai panašius atspalvius.",
-    )
-    # Spalvos panašumo slankiklis (tik tekstinei paieškai)
-    st.sidebar.slider(
-        "Spalvos panašumo riba",
-        0, 150,
-        st.session_state.get('text_color_threshold', 60), 10,
-        key="text_color_threshold",
-        help=(
-            "Kuo mažesnė reikšmė, tuo griežčiau parenkamos tik labai panašios spalvos. "
-            "Didesnė reikšmė leidžia platesnį atspalvių diapazoną."
-        ),
-    )
-
 # --- Early reset: if a NEW image is uploaded, unhide colour controls BEFORE rendering them
 is_new_upload = False
 if uploaded_file:

@@ -785,8 +785,8 @@ with col_right:
     elif not uploaded_file:
         st.caption("Įkelkite paveikslėlį, kad matytumėte atitikmenis internete.")
     else:
-        if st.session_state.get("_serpapi_error"):
-            with st.expander("Google paieškos klaida"): 
+        if st.session_state.get("_web_reverse_error"):
+            with st.expander("Google paieškos klaida"):
                 st.code(st.session_state["_web_reverse_error"])
 
         sims = (st.session_state.get("web_matches") or {}).get("similar_images", [])

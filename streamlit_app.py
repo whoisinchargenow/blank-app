@@ -4,6 +4,7 @@ import json
 import uuid
 import mimetypes
 from typing import Any, Dict, Optional, List, Tuple
+import html
 
 import requests
 import streamlit as st
@@ -779,7 +780,7 @@ with col_main:
         st.info("Įkelkite paveikslėlį.")
 
 with col_right:
-    st.subheader("🔎 Google rezultatai")
+    st.subheader("🔎 Google image results")
     if not SERPAPI_KEY:
         st.info("Google reverse image search neaktyvus: trūksta API rakto.")
     elif not uploaded_file:
@@ -803,11 +804,14 @@ with col_right:
             for item in sims:
                 thumb = item.get("thumb") or item.get("contentUrl")
                 url = item.get("hostPageUrl") or item.get("contentUrl")
-                name = item.get("name") or "Similar image"
                 if thumb:
+                    # escape to prevent broken tags when titles contain quotes; no visible text needed
+                    safe_thumb = html.escape(thumb, quote=True)
+                    safe_url = html.escape(url or "", quote=True)
                     st.markdown(
-                        f'<a href="{url}" target="_blank" rel="noopener noreferrer">'
-                        f'<img src="{thumb}" alt="{name}" style="width:95%;max-width:220px;border-radius:10px;display:block;border:1px solid #ddd;margin:0 auto 8px;"/></a>',
+                        f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">'
+                        f'<img src="{safe_thumb}" style="width:95%;max-width:220px;border-radius:10px;display:block;border:1px solid #ddd;margin:0 auto 8px;"/>'
+                        f'</a>',
                         unsafe_allow_html=True,
                     )
             st.markdown("</div>", unsafe_allow_html=True)

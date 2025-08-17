@@ -550,7 +550,7 @@ def render_pagination(total_pages: int, current_page_zerobased: int):
 
 st.set_page_config(page_title="Baldų paieška", layout="wide")
 st.title("🛋️ Baldų ir interjero elementų paieška")
-st.caption("Sistema pirmiausia ieško vizualiai panašių produktų. Tekstas – papildomas signalas.")
+st.caption("Sistema ieško vizualiai panašių produktų pagal įkeltą nuotrauką.")
 
 # Session state defaults
 for k, v in (
@@ -572,29 +572,9 @@ uploaded_file = st.sidebar.file_uploader(
     label_visibility="collapsed",
     help=(
         "Nuotrauka naudojama vizualinei paieškai — surandami vaizdu panašūs produktai. "
-        "Jei įvesite tekstą, jis dar labiau susiaurins rezultatus (pvz., modelis ar medžiaga). "
         "Įjungus spalvų filtrą, rezultatai papildomai filtruojami pagal objekto spalvą jūsų nuotraukoje. "
         "Leidžiami formatai: JPG, JPEG, PNG, WEBP."
     ),
-)
-# Išvalyti teksto paieškos lauką kiekvieno naujo paveikslėlio įkėlimo metu (prieš kuriant valdiklį)
-if uploaded_file:
-    try:
-        _hash_for_text = hash(uploaded_file.getvalue())
-        if st.session_state.get('last_upload_hash_textclear') != _hash_for_text:
-            st.session_state['last_upload_hash_textclear'] = _hash_for_text
-            st.session_state['search_text'] = ""
-    except Exception:
-        pass
-
-search_query = st.sidebar.text_input(
-    "🔍 Ieškoti pagal tekstą",
-    help=(
-        "Įveskite produkto pavadinimą, modelį ar frazę (pvz., ‘raudona sofa’). "
-        "Paieška vertina visos frazės prasmę (semantiškai), todėl ‘raudona sofa’ ieškos būtent raudonų sofų. "
-        "Jei įkelta nuotrauka, tekstas susiaurina vizualiai rastus rezultatus; jei nuotraukos nėra – ieško tik pagal tekstą."
-    ),
-    key="search_text",
 )
 
 # Optional: narrow by product type
@@ -721,18 +701,7 @@ if uploaded_file:
         sem_hits = sem_res.get("hits", []) if sem_res else []
         image_search_results = fuse_hits(vis_hits, sem_hits, alpha=0.88)
 
-        if search_query.strip():
-            # Parse color from text; if provided, use it to override image color filter
-            color_rgb_text, rest_text = parse_color_from_text(search_query)
-            if color_rgb_text is not None:
-                query_rgb = color_rgb_text
-            qtext = rest_text.strip() if rest_text else search_query.strip()
-            txt_res = marqo_search(q=qtext, limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
-            text_hits = txt_res.get("hits", []) if txt_res else []
-            text_ids = {h.get('_id') for h in text_hits}
-            final_hits = [h for h in image_search_results if h.get('_id') in text_ids]
-        else:
-            final_hits = image_search_results
+        final_hits = image_search_results
 
     # Client-side colour filtering using per-item hex colour
     if use_color_filter and query_rgb is not None and final_hits:
@@ -754,44 +723,11 @@ if uploaded_file:
             st.info("Dauguma įrašų neturi spalvos indekse — rodau be spalvų filtro.")
             final_hits = image_search_results
 
-# --- Main Logic Branch: Text-Only Search ---
-elif search_query.strip():
-elif search_query.strip():
-    # Text-only search: keep colour controls hidden & off
-    st.session_state.color_filter_hidden = True
-    st.session_state.color_controls_rerolled = False
-
-    with st.spinner("Ieškoma pagal tekstą..."):
-        color_rgb_text, rest_text = parse_color_from_text(search_query)
-        # Jei naudotojas pasirinko spalvą parinkiklyje – ji turi pirmenybę
-        if text_use_color_picker and isinstance(text_picker_hex, str):
-            _picked = hex_to_rgb(text_picker_hex)
-            if _picked is not None:
-                color_rgb_text = _picked
-
-        qtext = (rest_text.strip() if rest_text else "baldai")  # neutral fallback to fetch a broad set
-        txt_res = marqo_search(q=qtext, limit=1000, attrs=[TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD], method="TENSOR")
-        final_hits = txt_res.get("hits", []) if txt_res else []
-
-        # Apply colour filter (from text or picker), if any
-        if color_rgb_text is not None and final_hits:
-            threshold = float(st.session_state.get('text_color_threshold', 60))
-            kept, unknowns = [], []
-            for h in final_hits:
-                hx = get_hit_field(h, DOM_COLOR_FIELD, 'dominant_color')
-                rgb = hex_to_rgb(hx) if isinstance(hx, str) else None
-                if rgb is None:
-                    unknowns.append(h)
-                    continue
-                if color_distance(color_rgb_text, rgb) <= threshold:
-                    kept.append(h)
-            final_hits = kept if kept else final_hits
-
 # --- Initial State ---
 else:
     # Initial state: no image — hide colour controls
     st.session_state.color_filter_hidden = True
-    st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę.")
+    st.info("Įkelkite paveikslėlį.")
 
 # Before rendering, apply optional type narrowing
 final_hits = filter_by_type(final_hits, selected_type)
@@ -860,10 +796,10 @@ with col_main:
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-    elif uploaded_file or search_query:
+    elif uploaded_file:
         st.warning("Rezultatų nerasta. Pabandykite pakoreguoti užklausą ar filtrus.")
     else:
-        st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę.")
+        st.info("Įkelkite paveikslėlį.")
 
 with col_right:
     st.subheader("🔎 Google reverse (SerpAPI)")

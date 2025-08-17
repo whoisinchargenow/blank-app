@@ -780,7 +780,7 @@ with col_main:
         st.info("Įkelkite paveikslėlį.")
 
 with col_right:
-    st.subheader("🔎 Google image results")
+    st.subheader("🔎 Google rezultatai")
     if not SERPAPI_KEY:
         st.info("Google reverse image search neaktyvus: trūksta API rakto.")
     elif not uploaded_file:

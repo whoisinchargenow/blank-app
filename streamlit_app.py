@@ -14,13 +14,13 @@ import boto3
 
 # =============================================================
 # Streamlit App — Visual-first Similarity Search (Marqo + R2)
-# + Right-hand Google Lens (SerpAPI) reverse image pane
+# + Right-hand Google reverse image pane
 # =============================================================
 # - Prioritises visual similarity (image embeddings)
 # - Optional text refinement (lexical)
 # - Client-side colour filtering using per-product dominant colour (hex)
 # - Robust query image colour estimation (object-focused)
-# - Right pane shows reverse-image matches from Google (SerpAPI)
+# - Right pane shows reverse-image matches from Google
 # - 4-column main grid
 # =============================================================
 
@@ -61,7 +61,7 @@ R2_SECRET_ACCESS_KEY: Optional[str] = _cfg("R2_SECRET_ACCESS_KEY")
 R2_BUCKET: str = _cfg("R2_BUCKET", "streamlit098") or "streamlit098"
 PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "") or ""
 
-# SerpAPI (Google Lens)
+# Google reverse image (via API key)
 SERPAPI_KEY: Optional[str] = _cfg("SERPAPI_KEY")
 
 # =============================================================
@@ -383,11 +383,11 @@ def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
 
 
 # ===============================
-# SerpAPI (Google Lens) helper
+# Google reverse image helper
 # ===============================
 @st.cache_data(ttl=3600)
 def google_lens_reverse(image_url: str, *, max_items: int = 60) -> Dict[str, List[Dict[str, Any]]]:
-    """Reverse image via SerpAPI's Google Lens engine.
+    """Reverse image via a Google-compatible Lens endpoint.
     Returns {'similar_images': [...], 'pages_including': [...]}.
     """
     out = {"similar_images": [], "pages_including": []}
@@ -407,7 +407,7 @@ def google_lens_reverse(image_url: str, *, max_items: int = 60) -> Dict[str, Lis
         r.raise_for_status()
         data = r.json() if r.content else {}
     except requests.RequestException as e:
-        st.session_state["_serpapi_error"] = str(e)
+        st.session_state["_web_reverse_error"] = str(e)
         return out
 
     sims = data.get("visual_matches", []) or []
@@ -657,7 +657,7 @@ if uploaded_file:
             st.error(f"Nepavyko įkelti paveikslėlio: {e}")
             st.stop()
 
-        # --- Google Lens reverse search (SerpAPI) — CALL ONLY WHEN URL CHANGES ---
+        # --- Google reverse image search — CALL ONLY WHEN URL CHANGES ---
         if SERPAPI_KEY:
             if (
                 st.session_state.get("serp_query_url") != query_url
@@ -779,15 +779,15 @@ with col_main:
         st.info("Įkelkite paveikslėlį.")
 
 with col_right:
-    st.subheader("🔎 Google reverse (SerpAPI)")
+    st.subheader("🔎 Google image results")
     if not SERPAPI_KEY:
-        st.info("Pridėkite SERPAPI_KEY į .streamlit/secrets.toml, kad matytumėte atitikmenis internete.")
+        st.info("Google reverse image search neaktyvus: trūksta API rakto.")
     elif not uploaded_file:
         st.caption("Įkelkite paveikslėlį, kad matytumėte atitikmenis internete.")
     else:
         if st.session_state.get("_serpapi_error"):
-            with st.expander("SerpAPI klaida"):
-                st.code(st.session_state["_serpapi_error"])
+            with st.expander("Google paieškos klaida"): 
+                st.code(st.session_state["_web_reverse_error"])
 
         sims = (st.session_state.get("web_matches") or {}).get("similar_images", [])
         if not sims:
@@ -796,7 +796,7 @@ with col_right:
             # Scrollable single-column gallery in the side pane (independent scroll)
             st.markdown(
                 """
-                <div id="serpapi-pane" style="max-height:78vh; overflow-y:auto; padding-right:6px;">
+                <div id="google-pane" style="max-height:78vh; overflow-y:auto; padding-right:6px; display:flex; flex-direction:column; align-items:center;">
                 """,
                 unsafe_allow_html=True,
             )
@@ -807,7 +807,7 @@ with col_right:
                 if thumb:
                     st.markdown(
                         f'<a href="{url}" target="_blank" rel="noopener noreferrer">'
-                        f'<img src="{thumb}" alt="{name}" style="width:100%;border-radius:10px;display:block;border:1px solid #ddd;margin-bottom:8px;"/></a>',
+                        f'<img src="{thumb}" alt="{name}" style="width:95%;max-width:220px;border-radius:10px;display:block;border:1px solid #ddd;margin:0 auto 8px;"/></a>',
                         unsafe_allow_html=True,
                     )
             st.markdown("</div>", unsafe_allow_html=True)

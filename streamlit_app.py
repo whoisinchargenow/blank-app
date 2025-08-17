@@ -14,12 +14,14 @@ import boto3
 
 # =============================================================
 # Streamlit App — Visual-first Similarity Search (Marqo + R2)
+# + Right-hand Google Lens (SerpAPI) reverse image pane
 # =============================================================
 # - Prioritises visual similarity (image embeddings)
 # - Optional text refinement (lexical)
 # - Client-side colour filtering using per-product dominant colour (hex)
 # - Robust query image colour estimation (object-focused)
-# - No type-gating
+# - Right pane shows reverse-image matches from Google (SerpAPI)
+# - 4-column main grid
 # =============================================================
 
 # -----------------------------
@@ -59,13 +61,15 @@ R2_SECRET_ACCESS_KEY: Optional[str] = _cfg("R2_SECRET_ACCESS_KEY")
 R2_BUCKET: str = _cfg("R2_BUCKET", "streamlit098") or "streamlit098"
 PUBLIC_BASE_URL: str = _cfg("PUBLIC_BASE_URL", "") or ""
 
+# SerpAPI (Google Lens)
+SERPAPI_KEY: Optional[str] = _cfg("SERPAPI_KEY")
+
 # =============================================================
 # Helpers
 # =============================================================
 
 # Known tensor fields present in your index (adjust if you add more)
 KNOWN_TENSOR_FIELDS = {"image", "name", "description", "spec_text", "search_blob"}
-
 
 # ---- Product type support (to narrow results) ----
 TYPE_FIELDS = ["product_type", "type", "object_type", "category"]
@@ -149,6 +153,7 @@ def filter_by_type(hits: List[Dict[str, Any]], selected_type: Optional[str]) -> 
             out.append(h)
     return out
 
+
 def get_hit_field(hit: Dict[str, Any], *names: str) -> Optional[Any]:
     """Safely get a field from different possible locations in Marqo hits.
     Checks top-level, then 'fields', then 'document'. Returns first non-empty value.
@@ -192,27 +197,20 @@ def sanitize_attrs(attrs: Optional[List[str]], *, for_method: str) -> List[str]:
         clean = [IMAGE_FIELD] if for_method.upper() == "TENSOR" else [TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
     return clean
 
-# Known tensor fields present in your index (adjust if you add more)
+# (duplicated in original – keep to avoid breaking changes)
 KNOWN_TENSOR_FIELDS = {"image", "name", "description", "spec_text", "search_blob"}
 
-
 def sanitize_attrs(attrs: Optional[List[str]], *, for_method: str) -> List[str]:
-    """Map aliases and drop unknown fields to avoid 400s from Marqo.
-    - maps 'title' -> 'name'
-    - removes attributes not in KNOWN_TENSOR_FIELDS
-    - for LEXICAL, defaults to textual fields
-    - for TENSOR image queries, you can pass [IMAGE_FIELD]
-    """
     if attrs is None:
         if for_method.upper() == "LEXICAL":
             attrs = [TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
         else:
             attrs = [IMAGE_FIELD, TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
     clean: List[str] = []
-    for a in attrs:
+    for a in attrs or []:
+        a = (a or "").strip()
         if not a:
             continue
-        a = a.strip()
         if a == "title":
             a = "name"
         if a in KNOWN_TENSOR_FIELDS and a not in clean:
@@ -220,6 +218,7 @@ def sanitize_attrs(attrs: Optional[List[str]], *, for_method: str) -> List[str]:
     if not clean:
         clean = [IMAGE_FIELD] if for_method.upper() == "TENSOR" else [TITLE_FIELD, DESCRIPTION_FIELD, "spec_text", SEARCH_BLOB_FIELD]
     return clean
+
 
 def to_hex(rgb: np.ndarray | Tuple[int, int, int]) -> str:
     r, g, b = [int(max(0, min(255, v))) for v in (rgb if isinstance(rgb, (list, tuple, np.ndarray)) else (0, 0, 0))]
@@ -383,6 +382,60 @@ def get_dominant_color(image_bytes: bytes) -> Optional[np.ndarray]:
     return np.array([int(mean[0]), int(mean[1]), int(mean[2])])
 
 
+# ===============================
+# SerpAPI (Google Lens) helper
+# ===============================
+@st.cache_data(ttl=3600)
+def google_lens_reverse(image_url: str, *, max_items: int = 60) -> Dict[str, List[Dict[str, Any]]]:
+    """Reverse image via SerpAPI's Google Lens engine.
+    Returns {'similar_images': [...], 'pages_including': [...]}.
+    """
+    out = {"similar_images": [], "pages_including": []}
+    if not (image_url and SERPAPI_KEY):
+        return out
+
+    try:
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google_lens",
+                "url": image_url,
+                "api_key": SERPAPI_KEY,
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json() if r.content else {}
+    except requests.RequestException as e:
+        st.session_state["_serpapi_error"] = str(e)
+        return out
+
+    sims = data.get("visual_matches", []) or []
+    out["similar_images"] = [
+        {
+            "name": m.get("title") or "Similar image",
+            "thumb": m.get("thumbnail") or m.get("original"),
+            "contentUrl": m.get("link") or m.get("original"),
+            "hostPageUrl": m.get("link"),
+            "hostPageDisplayUrl": m.get("source") or m.get("displayed_link"),
+        }
+        for m in sims[:max_items]
+    ]
+
+    pages = data.get("pages_with_matching_images", []) or []
+    out["pages_including"] = [
+        {
+            "name": p.get("title") or p.get("link"),
+            "thumb": None,
+            "contentUrl": p.get("link"),
+            "hostPageUrl": p.get("link"),
+            "hostPageDisplayUrl": p.get("source") or p.get("displayed_link"),
+        }
+        for p in pages[:max_items]
+    ]
+    return out
+
+
 # Marqo search (HTTP API)
 
 def marqo_search(q: str, limit: int = 200, attrs: Optional[List[str]] = None, method: str = "TENSOR") -> Optional[Dict[str, Any]]:
@@ -541,7 +594,7 @@ search_query = st.sidebar.text_input(
         "Paieška vertina visos frazės prasmę (semantiškai), todėl ‘raudona sofa’ ieškos būtent raudonų sofų. "
         "Jei įkelta nuotrauka, tekstas susiaurina vizualiai rastus rezultatus; jei nuotraukos nėra – ieško tik pagal tekstą."
     ),
-key="search_text",
+    key="search_text",
 )
 
 # Optional: narrow by product type
@@ -623,6 +676,9 @@ else:
 
 final_hits: List[Dict[str, Any]] = []
 
+# Prepare web reverse matches for the right pane
+web_matches: Dict[str, List[Dict[str, Any]]] = {"similar_images": [], "pages_including": []}
+
 # --- Main Logic Branch: Image Search (+ optional text) ---
 if uploaded_file:
     st.sidebar.image(uploaded_file, caption="Įkeltas paveikslėlis", width=180)
@@ -643,6 +699,12 @@ if uploaded_file:
         except Exception as e:
             st.error(f"Nepavyko įkelti paveikslėlio: {e}")
             st.stop()
+
+        # --- NEW: Google Lens reverse search (SerpAPI) ---
+        if SERPAPI_KEY:
+            web_matches = google_lens_reverse(query_url, max_items=60) or web_matches
+        else:
+            web_matches = {"similar_images": [], "pages_including": []}
 
         # Visual-only and text-fields tensor searches (no server-side colour filter)
         vis_res = marqo_search(query_url, attrs=[IMAGE_FIELD], method="TENSOR")
@@ -727,59 +789,99 @@ else:
 final_hits = filter_by_type(final_hits, selected_type)
 
 # =============================================================
-# Render Results
+# Render Results (4-column main grid + right-hand reverse pane)
 # =============================================================
 
-if final_hits:
-    # Reset pagination when result size changes
-    if "last_hit_count" not in st.session_state or st.session_state.last_hit_count != len(final_hits):
-        st.session_state.page = 0
-    st.session_state.last_hit_count = len(final_hits)
+col_main, col_right = st.columns([5, 2])  # bigger main pane, slimmer right pane
 
-    st.subheader(f"Rasta rezultatų: {len(final_hits)}")
-    page_size = 50  # 5 per row × 10 rows per page
-    total_pages = (len(final_hits) - 1) // page_size + 1
-    current_page = st.session_state.page
+with col_main:
+    if final_hits:
+        # Reset pagination when result size changes
+        if "last_hit_count" not in st.session_state or st.session_state.last_hit_count != len(final_hits):
+            st.session_state.page = 0
+        st.session_state.last_hit_count = len(final_hits)
 
-    render_pagination(total_pages, current_page)
+        st.subheader(f"Rasta rezultatų: {len(final_hits)}")
+        page_size = 40  # 4 per row × 10 rows per page
+        total_pages = (len(final_hits) - 1) // page_size + 1
+        current_page = st.session_state.page
 
-    start_idx = current_page * page_size
-    end_idx = start_idx + page_size
-    page_hits = final_hits[start_idx:end_idx]
+        render_pagination(total_pages, current_page)
 
-    cols = st.columns(5)
-    for i, h in enumerate(page_hits):
-        with cols[i % 5]:
-            img_url = get_hit_field(h, IMAGE_FIELD, ALT_IMAGE_FIELD, "image")
-            title = get_hit_field(h, TITLE_FIELD, 'title') or 'Be pavadinimo'
-            sku = get_hit_field(h, SKU_FIELD, 'product_id', 'sku', 'SKU') or h.get('_id')
-            click_url = get_hit_field(h, CLICK_URL_FIELD, 'product_url')
-            dom_color_hex = get_hit_field(h, DOM_COLOR_FIELD, 'dominant_color')
-            score = h.get('_fused_score', h.get('_score', None))
+        start_idx = current_page * page_size
+        end_idx = start_idx + page_size
+        page_hits = final_hits[start_idx:end_idx]
 
-            if img_url and click_url:
-                alt_txt = f"{title} · SKU {sku}" if sku else title
-                st.markdown(
-                    f'<a href="{click_url}" target="_blank" rel="noopener noreferrer" title="Atidaryti produktą">'
-                    f'<img src="{img_url}" alt="{alt_txt}" style="width:100%;border-radius:12px;display:block;"/></a>',
-                    unsafe_allow_html=True,
-                )
-            elif img_url:
-                st.image(img_url, use_container_width=True)
-            if sku:
-                st.write(f"**{title}** · `{sku}`")
-            else:
-                st.write(f"**{title}**")
-            if isinstance(score, (int, float)):
-                st.caption(f"Panašumas: {score:.3f}")
-            if isinstance(dom_color_hex, str) and len(dom_color_hex) >= 4:
-                st.markdown(
-                    f'<div style="display:flex;align-items:center;gap:8px">'
-                    f'<div style="width:20px;height:20px;background:{dom_color_hex};border:1px solid #ccc;border-radius:4px"></div>'
-                    f'<span>{dom_color_hex}</span></div>',
-                    unsafe_allow_html=True,
-                )
-            st.markdown('---')
+        # ---- 4 columns instead of 5 ----
+        cols = st.columns(4)
+        for i, h in enumerate(page_hits):
+            with cols[i % 4]:
+                img_url = get_hit_field(h, IMAGE_FIELD, ALT_IMAGE_FIELD, "image")
+                title = get_hit_field(h, TITLE_FIELD, 'title') or 'Be pavadinimo'
+                sku = get_hit_field(h, SKU_FIELD, 'product_id', 'sku', 'SKU') or h.get('_id')
+                click_url = get_hit_field(h, CLICK_URL_FIELD, 'product_url')
+                dom_color_hex = get_hit_field(h, DOM_COLOR_FIELD, 'dominant_color')
+                score = h.get('_fused_score', h.get('_score', None))
 
-elif uploaded_file or search_query:
-    st.warning("Rezultatų nerasta. Pabandykite pakoreguoti užklausą ar filtrus.")
+                if img_url and click_url:
+                    alt_txt = f"{title} · SKU {sku}" if sku else title
+                    st.markdown(
+                        f'<a href="{click_url}" target="_blank" rel="noopener noreferrer" title="Atidaryti produktą">'
+                        f'<img src="{img_url}" alt="{alt_txt}" style="width:100%;border-radius:12px;display:block;"/></a>',
+                        unsafe_allow_html=True,
+                    )
+                elif img_url:
+                    st.image(img_url, use_container_width=True)
+                if sku:
+                    st.write(f"**{title}** · `{sku}`")
+                else:
+                    st.write(f"**{title}**")
+                if isinstance(score, (int, float)):
+                    st.caption(f"Panašumas: {score:.3f}")
+                if isinstance(dom_color_hex, str) and len(dom_color_hex) >= 4:
+                    st.markdown(
+                        f'<div style="display:flex;align-items:center;gap:8px">'
+                        f'<div style="width:20px;height:20px;background:{dom_color_hex};border:1px solid #ccc;border-radius:4px"></div>'
+                        f'<span>{dom_color_hex}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                st.markdown('---')
+
+    elif uploaded_file or search_query:
+        st.warning("Rezultatų nerasta. Pabandykite pakoreguoti užklausą ar filtrus.")
+    else:
+        st.info("Įkelkite paveikslėlį arba įveskite paieškos frazę.")
+
+with col_right:
+    st.subheader("🔎 Google reverse (SerpAPI)")
+    if not SERPAPI_KEY:
+        st.info("Pridėkite SERPAPI_KEY į .streamlit/secrets.toml, kad matytumėte atitikmenis internete.")
+    elif not uploaded_file:
+        st.caption("Įkelkite paveikslėlį, kad matytumėte atitikmenis internete.")
+    else:
+        if st.session_state.get("_serpapi_error"):
+            with st.expander("SerpAPI klaida"):
+                st.code(st.session_state["_serpapi_error"])
+
+        sims = (web_matches or {}).get("similar_images", [])
+        if not sims:
+            st.caption("Nerasta atitikmenų (arba išnaudotas limitas).")
+        else:
+            # Scrollable single-column gallery in the side pane
+            st.markdown(
+                """
+                <div style="max-height: 78vh; overflow-y: auto; padding-right: 6px;">
+                """,
+                unsafe_allow_html=True,
+            )
+            for item in sims:
+                thumb = item.get("thumb") or item.get("contentUrl")
+                url = item.get("hostPageUrl") or item.get("contentUrl")
+                name = item.get("name") or "Similar image"
+                if thumb:
+                    st.markdown(
+                        f'<a href="{url}" target="_blank" rel="noopener noreferrer">'
+                        f'<img src="{thumb}" alt="{name}" style="width:100%;border-radius:10px;display:block;border:1px solid #ddd;margin-bottom:8px;"/></a>',
+                        unsafe_allow_html=True,
+                    )
+            st.markdown("</div>", unsafe_allow_html=True)
